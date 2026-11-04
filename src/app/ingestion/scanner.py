@@ -6,16 +6,19 @@ SUPPORTED = {".pdf", ".jpg", ".jpeg", ".png", ".heic", ".docx", ".txt",
 def scan_folder(root: Path) -> list[dict]:
     files = []
     for p in sorted(root.rglob("*")):
-        rel = p.relative_to(root)
-        if p.is_symlink() or not p.is_file():
+        try:
+            rel = p.relative_to(root)
+            if p.is_symlink() or not p.is_file():
+                continue
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            st = p.stat()
+        except OSError:
             continue
-        if any(part.startswith(".") for part in rel.parts):   # hidden files/folders
-            continue
-        st = p.stat()
         ext = p.suffix.lower()
         files.append({
             "name": p.name,
-            "path": str(p),              # exact absolute path
+            "path": str(p),
             "rel_path": str(rel),
             "ext": ext,
             "size": st.st_size,
