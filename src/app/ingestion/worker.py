@@ -2,6 +2,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from pymongo import ReturnDocument
 from app.db import db
+from app.ingestion.readers import read_document
+
 
 async def process_source(source_id: str, job_id: str) -> None:
     try:
@@ -20,9 +22,28 @@ async def process_source(source_id: str, job_id: str) -> None:
                 path = Path(doc["path"])
                 if not path.is_file() or not path.resolve().is_relative_to(root):
                     raise FileNotFoundError(doc["path"])
-                # read → classify → extract → save facts   (next step)
-                await db.files.update_one({"_id": doc["_id"]}, {"$set": {
-                    "status": "done", "processed_at": datetime.now(timezone.utc)}})
+
+                pages = await read_document(path)              # text layer / OCR / docx / txt
+                chars = sum(len(p.text) for p in pages)
+                if chars == 0:
+                    raise ValueError("No text could be extracted")
+
+                await db.pages.delete_many({"file_id": doc["_id"]})   # safe on re-runs
+                await db.pages.insert_many([{
+                    "_id": f"{doc['_id']}:{p.page}",
+                    "file_id": doc["_id"],
+                    "source_id": source_id,
+                    "page": p.page,
+                    "text": p.text,
+                    "method": p.method,
+                    "confidence": p.confidence,
+                } for p in pages])
+
+                await db.files.update_one({"_id": doc["_id"]}, {
+                    "$set": {"status": "done", "pages": len(pages), "chars": chars,
+                             "processed_at": datetime.now(timezone.utc)},
+                    "$unset": {"error": ""},
+                })
             except Exception as e:
                 await db.files.update_one({"_id": doc["_id"]},
                                           {"$set": {"status": "failed", "error": str(e)}})
