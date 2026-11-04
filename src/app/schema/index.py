@@ -1,9 +1,6 @@
-import re
-from pathlib import PurePosixPath
+from pathlib import Path
 
 from pydantic import BaseModel, field_validator
-
-PATH_RE = re.compile(r"/(?:[\w.\-() ]+/)*[\w.\-() ]+/?")
 
 
 class DocOutput(BaseModel):
@@ -13,15 +10,13 @@ class DocOutput(BaseModel):
     status: str = "pending"
 
 
-class DocInput(BaseModel):
-    url: str
+class SourceInput(BaseModel):
+    path: str
 
-    @field_validator("url")
+    @field_validator("path")
     @classmethod
-    def validate_url(cls, v: str) -> str:
-        v = v.strip()
-        if not PATH_RE.fullmatch(v):
-            raise ValueError("url must be an absolute folder path, e.g. /home/user/docs")
-        if ".." in PurePosixPath(v).parts:
-            raise ValueError("'..' is not allowed in the path")
-        return v
+    def validate_path(cls, value: str) -> str:
+        path = Path(value.strip()).expanduser()
+        if not path.is_absolute():
+            raise ValueError("path must be an absolute folder path")
+        return str(path)

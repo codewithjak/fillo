@@ -6,8 +6,18 @@ from app.ingestion.readers import read_document
 
 
 async def process_source(source_id: str, job_id: str) -> None:
+    job = await db.jobs.find_one_and_update(
+        {"_id": job_id, "status": "pending"},
+        {"$set": {"status": "running", "started_at": datetime.now(timezone.utc)}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if job is None:
+        return
+
     try:
         source = await db.sources.find_one({"_id": source_id})
+        if source is None:
+            raise ValueError("Source record not found")
         root = Path(source["path"])
 
         while True:
@@ -49,10 +59,22 @@ async def process_source(source_id: str, job_id: str) -> None:
                                           {"$set": {"status": "failed", "error": str(e)}})
 
         counts = {s: await db.files.count_documents({"source_id": source_id, "status": s})
-                  for s in ("done", "failed", "skipped")}
-        await db.jobs.update_one({"_id": job_id}, {"$set": {"status": "done", **counts}})
+                  for s in ("done", "failed", "skipped", "pending", "processing")}
+        if counts["pending"] or counts["processing"]:
+            job_status = "incomplete"
+        elif counts["failed"] == 0:
+            job_status = "completed"
+        elif counts["done"] > 0:
+            job_status = "partial_failure"
+        else:
+            job_status = "failed"
+        await db.jobs.update_one({"_id": job_id}, {"$set": {
+            "status": job_status,
+            "finished_at": datetime.now(timezone.utc),
+            **counts,
+        }})
 
     except Exception as e:
         await db.jobs.update_one({"_id": job_id},
-                                 {"$set": {"status": "failed", "error": str(e)}})
-        raise
+                                 {"$set": {"status": "failed", "error": str(e),
+                                            "finished_at": datetime.now(timezone.utc)}})

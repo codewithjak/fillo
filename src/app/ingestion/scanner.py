@@ -1,7 +1,6 @@
 from pathlib import Path
 
-SUPPORTED = {".pdf", ".jpg", ".jpeg", ".png", ".heic", ".docx", ".txt",
-             ".mp3", ".m4a", ".wav", ".ogg"}
+SUPPORTED = {".pdf", ".jpg", ".jpeg", ".png", ".heic", ".docx", ".txt"}
 
 def scan_folder(root: Path) -> list[dict]:
     files = []
