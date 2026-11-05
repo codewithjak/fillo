@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     ocr_lang: str = "eng"                       # tesseract languages, e.g. "eng+urd"
     ocr_model: str = "claude-sonnet-5-5"
     anthropic_api_key: str | None = None
+    agent_model: str = "claude-sonnet-5"
+    remote_source_root: Path = Path("data/remote-sources")
 
     @field_validator("api_key")
     @classmethod

@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from app.config import settings
 from app.db import client, db
 from app.ingestion.worker import process_source
+from app.routes.agent import router as agent_router
 from app.routes.route import router
 from app.routes.status import router as status_router
 
@@ -70,6 +71,7 @@ app = FastAPI(title="fillo", lifespan=lifespan)
 
 app.include_router(router)
 app.include_router(status_router)
+app.include_router(agent_router)
 
 
 def main() -> None:

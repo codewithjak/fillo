@@ -1,0 +1,202 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="2920" viewBox="0 0 1600 2920" role="img" aria-labelledby="title desc">
+  <title id="title">Fillo agentic document-to-form workflow</title>
+  <desc id="desc">A controlled agent loop for scanning documents, proposing evidenced facts, inspecting forms, matching and validating fields, filling a draft, and requiring user approval before submission.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L11,6 L1,11 Z" fill="#53657b"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L11,6 L1,11 Z" fill="#2770c7"/>
+    </marker>
+    <style>
+      text { font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Arial, sans-serif; fill: #152538; }
+      .title { font-size: 34px; font-weight: 750; }
+      .subtitle { font-size: 18px; fill: #52647a; }
+      .head { font-size: 20px; font-weight: 700; }
+      .body { font-size: 16px; fill: #34475d; }
+      .small { font-size: 14px; fill: #52647a; }
+      .center { text-anchor: middle; }
+      .box { fill: #fff; stroke: #9aacc0; stroke-width: 2; rx: 16; }
+      .blue { fill: #edf5ff; stroke: #3980cf; stroke-width: 2.5; rx: 16; }
+      .teal { fill: #eaf8f5; stroke: #329582; stroke-width: 2.5; rx: 16; }
+      .gold { fill: #fff7e8; stroke: #d49a2b; stroke-width: 2.5; rx: 16; }
+      .red { fill: #fff0ef; stroke: #d36b61; stroke-width: 2; rx: 16; }
+      .decision { fill: #fff8e8; stroke: #d49a2b; stroke-width: 2.5; }
+      .line { fill: none; stroke: #53657b; stroke-width: 2.5; marker-end: url(#arrow); }
+      .lineBlue { fill: none; stroke: #2770c7; stroke-width: 2.5; marker-end: url(#arrowBlue); }
+      .dash { fill: none; stroke: #2770c7; stroke-width: 2.5; stroke-dasharray: 9 8; marker-end: url(#arrowBlue); }
+      .tag { font-size: 14px; font-weight: 700; fill: #2770c7; }
+    </style>
+  </defs>
+  <rect width="1600" height="2920" fill="#f5f8fc"/>
+
+  <text x="800" y="58" class="title center">Fillo: agentic document-to-form workflow</text>
+  <text x="800" y="91" class="subtitle center">The agent selects permitted tools; code and the user control scope, evidence, validation, and submission.</text>
+
+  <rect x="475" y="125" width="650" height="76" class="blue"/>
+  <text x="800" y="157" class="head center">User asks Fillo to prepare a form</text>
+  <text x="800" y="182" class="body center">User selects the documents and identifies the target form</text>
+  <path d="M800 201 L800 227" class="line"/>
+
+  <polygon points="800,227 1000,292 800,357 600,292" class="decision"/>
+  <text x="800" y="286" class="head center">Are source folder and form</text>
+  <text x="800" y="312" class="head center">within the user's authority?</text>
+  <path d="M600 292 L350 292 L350 370" class="line"/>
+  <text x="465" y="279" class="tag center">No</text>
+  <rect x="155" y="370" width="390" height="80" class="red"/>
+  <text x="350" y="402" class="head center">Stop and explain what's missing</text>
+  <text x="350" y="427" class="body center">or outside the configured scope</text>
+  <path d="M800 357 L800 390" class="line"/>
+  <text x="824" y="379" class="tag">Yes</text>
+
+  <rect x="485" y="390" width="630" height="70" class="box"/>
+  <text x="800" y="420" class="head center">Create a persisted task and audit record</text>
+  <text x="800" y="444" class="body center">Track goal, selected sources, results, approvals, and provenance</text>
+  <path d="M800 460 L800 482" class="line"/>
+  <rect x="485" y="482" width="630" height="82" class="blue"/>
+  <text x="800" y="516" class="head center">Agent planner</text>
+  <text x="800" y="541" class="body center">Choose one next step from the task state; never bypass tool policy</text>
+  <path d="M800 564 L800 588" class="lineBlue"/>
+  <polygon points="800,588 1010,655 800,722 590,655" class="decision"/>
+  <text x="800" y="650" class="head center">Choose a permitted</text>
+  <text x="800" y="676" class="head center">tool or ask the user</text>
+  <text x="800" y="745" class="small center">Each result is added to task state, then the agent replans</text>
+
+  <!-- Four tool cards -->
+  <rect x="48" y="775" width="356" height="365" class="box"/>
+  <text x="226" y="812" class="head center">1 · Scan documents</text>
+  <text x="74" y="853" class="body">
+    <tspan x="74" dy="0">• Check the explicitly selected folder</tspan>
+    <tspan x="94" dy="25">against configured allowed roots</tspan>
+    <tspan x="74" dy="34">• Call scan_directory</tspan>
+    <tspan x="74" dy="34">• Poll get_job_status until terminal</tspan>
+    <tspan x="94" dy="25">status; keep per-file errors</tspan>
+    <tspan x="74" dy="34">• Read extracted pages and provenance</tspan>
+    <tspan x="94" dy="25">for selected files</tspan>
+  </text>
+  <text x="74" y="1107" class="small">No arbitrary filesystem access</text>
+
+  <rect x="428" y="775" width="356" height="365" class="teal"/>
+  <text x="606" y="812" class="head center">2 · Propose facts</text>
+  <text x="454" y="853" class="body">
+    <tspan x="454" dy="0">• LLM returns typed fact proposals</tspan>
+    <tspan x="474" dy="25">with value, page, quote, confidence</tspan>
+    <tspan x="454" dy="34">• Code checks file/page references</tspan>
+    <tspan x="474" dy="25">and verifies quote against source text</tspan>
+    <tspan x="454" dy="34">• User accepts, edits, or rejects</tspan>
+    <tspan x="474" dy="25">before facts enter the trusted store</tspan>
+  </text>
+  <text x="454" y="1107" class="small">Unsupported values remain proposals</text>
+
+  <rect x="808" y="775" width="356" height="365" class="box"/>
+  <text x="986" y="812" class="head center">3 · Search facts</text>
+  <text x="834" y="853" class="body">
+    <tspan x="834" dy="0">• Query accepted facts by key, alias,</tspan>
+    <tspan x="854" dy="25">type, or meaning as needed</tspan>
+    <tspan x="834" dy="34">• Return original and normalized</tspan>
+    <tspan x="854" dy="25">values with source evidence</tspan>
+    <tspan x="834" dy="34">• Surface conflicts; do not silently</tspan>
+    <tspan x="854" dy="25">select the winning value</tspan>
+  </text>
+  <text x="834" y="1107" class="small">Read-only search tool</text>
+
+  <rect x="1188" y="775" width="356" height="365" class="box"/>
+  <text x="1366" y="812" class="head center">4 · Inspect form</text>
+  <text x="1214" y="853" class="body">
+    <tspan x="1214" dy="0">• Read accessible HTML labels, types,</tspan>
+    <tspan x="1234" dy="25">required flags, options, constraints</tspan>
+    <tspan x="1214" dy="34">• Capture browser locators when</tspan>
+    <tspan x="1234" dy="25">available; keep inspection read-only</tspan>
+    <tspan x="1214" dy="34">• Use vision only for scanned or</tspan>
+    <tspan x="1234" dy="25">poorly labeled forms</tspan>
+  </text>
+  <text x="1214" y="1107" class="small">No form submission during inspection</text>
+
+  <!-- Tool result return loop -->
+  <path d="M226 1140 L226 1180 L800 1180" class="line"/>
+  <path d="M606 1140 L606 1180" class="line"/>
+  <path d="M986 1140 L986 1180" class="line"/>
+  <path d="M1366 1140 L1366 1180 L800 1180" class="line"/>
+  <path d="M800 1180 L800 1200" class="line"/>
+  <rect x="420" y="1200" width="760" height="76" class="blue"/>
+  <text x="800" y="1232" class="head center">Tool result + provenance update the task state</text>
+  <text x="800" y="1257" class="body center">Agent observes the result and chooses another step or proceeds</text>
+  <path d="M800 1200 L800 1155 L1565 1155 L1565 523 L1115 523" class="dash"/>
+  <text x="1464" y="840" class="tag" transform="rotate(-90 1464 840)">Observe result → replan</text>
+  <path d="M800 1276 L800 1305" class="line"/>
+
+  <polygon points="800,1305 1025,1375 800,1445 575,1375" class="decision"/>
+  <text x="800" y="1368" class="head center">Enough supported facts</text>
+  <text x="800" y="1394" class="head center">and a form description?</text>
+  <path d="M575 1375 L270 1375 L270 1465" class="line"/>
+  <text x="410" y="1362" class="tag center">No / unclear</text>
+  <rect x="70" y="1465" width="400" height="84" class="gold"/>
+  <text x="270" y="1498" class="head center">Ask user for missing input</text>
+  <text x="270" y="1524" class="body center">or a decision on conflicting facts</text>
+  <path d="M270 1549 L270 1580 L485 1580 L485 523" class="dash"/>
+  <text x="300" y="1572" class="tag">Resume task</text>
+  <path d="M800 1445 L800 1470" class="line"/>
+  <text x="824" y="1463" class="tag">Yes</text>
+
+  <rect x="420" y="1470" width="760" height="92" class="teal"/>
+  <text x="800" y="1505" class="head center">Match facts to form fields</text>
+  <text x="800" y="1533" class="body center">Rules and aliases first; LLM suggests only ambiguous semantic matches</text>
+  <path d="M800 1562 L800 1585" class="line"/>
+  <polygon points="800,1585 1015,1650 800,1715 585,1650" class="decision"/>
+  <text x="800" y="1643" class="head center">Does each proposed value have</text>
+  <text x="800" y="1669" class="head center">supporting evidence and a clear match?</text>
+  <path d="M585 1650 L270 1650 L270 1465" class="dash"/>
+  <text x="425" y="1637" class="tag center">No: ask / clarify</text>
+  <path d="M800 1715 L800 1740" class="line"/>
+  <text x="824" y="1734" class="tag">Yes</text>
+
+  <rect x="420" y="1740" width="760" height="88" class="box"/>
+  <text x="800" y="1775" class="head center">Deterministic validation</text>
+  <text x="800" y="1803" class="body center">Check required fields, types, date/number formats, options, and constraints</text>
+  <path d="M800 1828 L800 1850" class="line"/>
+  <polygon points="800,1850 1000,1912 800,1974 600,1912" class="decision"/>
+  <text x="800" y="1907" class="head center">Does the proposal pass?</text>
+  <text x="800" y="1933" class="body center">Never invent a missing value</text>
+  <path d="M600 1912 L270 1912 L270 1549" class="dash"/>
+  <text x="424" y="1899" class="tag center">No: explain / ask</text>
+  <path d="M800 1974 L800 1995" class="line"/>
+  <text x="824" y="1990" class="tag">Yes</text>
+
+  <rect x="420" y="1995" width="760" height="84" class="blue"/>
+  <text x="800" y="2029" class="head center">Fill a browser draft only</text>
+  <text x="800" y="2055" class="body center">Use inspected locators and the validated proposal; do not submit</text>
+  <path d="M800 2079 L800 2100" class="line"/>
+  <rect x="420" y="2100" width="760" height="78" class="box"/>
+  <text x="800" y="2132" class="head center">Read the form back and verify entered values</text>
+  <text x="800" y="2157" class="body center">If anything differs, stop and return for correction</text>
+  <path d="M800 2178 L800 2200" class="line"/>
+  <rect x="420" y="2200" width="760" height="92" class="teal"/>
+  <text x="800" y="2236" class="head center">Human review</text>
+  <text x="800" y="2264" class="body center">Show every field, proposed value, source fact, and supporting evidence</text>
+  <path d="M800 2292 L800 2315" class="line"/>
+
+  <polygon points="800,2315 1030,2385 800,2455 570,2385" class="decision"/>
+  <text x="800" y="2378" class="head center">User edits, approves draft,</text>
+  <text x="800" y="2404" class="head center">or requests submission?</text>
+  <path d="M570 2385 L330 2385 L330 1650 L585 1650" class="dash"/>
+  <text x="415" y="2372" class="tag center">Edit → rematch</text>
+  <path d="M800 2455 L800 2480" class="line"/>
+  <polygon points="800,2480 1010,2545 800,2610 590,2545" class="decision"/>
+  <text x="800" y="2538" class="head center">Explicit approval for this</text>
+  <text x="800" y="2564" class="head center">submission and declarations?</text>
+  <path d="M590 2545 L270 2545 L270 2640" class="line"/>
+  <text x="425" y="2532" class="tag center">No / draft only</text>
+  <rect x="90" y="2640" width="360" height="70" class="box"/>
+  <text x="270" y="2683" class="head center">Save draft and finish</text>
+  <path d="M800 2610 L800 2640" class="lineBlue"/>
+  <text x="824" y="2632" class="tag">Yes</text>
+  <rect x="530" y="2640" width="540" height="74" class="gold"/>
+  <text x="800" y="2672" class="head center">Call separately permissioned submit tool</text>
+  <text x="800" y="2697" class="body center">Only after explicit user approval</text>
+  <path d="M800 2714 L800 2740" class="line"/>
+  <rect x="530" y="2740" width="540" height="72" class="teal"/>
+  <text x="800" y="2772" class="head center">Record result and show it to the user</text>
+  <text x="800" y="2797" class="body center">Keep the audit trail and source provenance</text>
+
+  <text x="800" y="2860" class="small center">Agent autonomy is limited to choosing tools and sequencing work; permissions and consequential actions remain gated.</text>
+</svg>

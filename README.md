@@ -4,6 +4,11 @@ Fillo scans configured local folders, extracts text from supported documents, an
 provides authenticated API endpoints for tracking ingestion jobs and reading the
 extracted pages.
 
+The initial LangChain intake agent can also inspect a user-provided public link.
+It identifies static HTML forms and queues linked supported documents through
+the same ingestion worker. This first agent slice reads and reports on inputs;
+it does not extract accepted facts, match fields, fill forms, or submit them.
+
 ## Requirements
 
 - Python 3.12 or newer
@@ -29,6 +34,12 @@ Copy `.env.example` to `.env` and set:
   scan. The requested folder must be one of these directories or a child of one.
 - `OCR_ENGINE` and `OCR_LANG`: optional Tesseract settings. Set
   `OCR_ENGINE=claude` and `ANTHROPIC_API_KEY` to use Claude Vision OCR.
+- `ANTHROPIC_API_KEY`: required by the intake agent; also required for Claude
+  Vision OCR when selected.
+- `AGENT_MODEL`: optional Anthropic model name for LangChain (defaults to
+  `claude-sonnet-5`).
+- `REMOTE_SOURCE_ROOT`: local managed directory for downloaded linked
+  documents (defaults to `./data/remote-sources`).
 
 Fillo binds to `127.0.0.1` when started with its command. Keep it on a trusted
 machine; use an authenticated, TLS protected deployment if you intentionally
@@ -88,3 +99,37 @@ curl --get "http://127.0.0.1:8000/api/v1/sources/<source_id>/pages" \
 
 Jobs are stored in MongoDB and pending or interrupted jobs are resumed when the
 service starts. Run one Fillo server process against a database at a time.
+
+## Agentic intake
+
+Give the intake agent a public link to a supported document or an online form.
+For a document link, Fillo downloads the file into `REMOTE_SOURCE_ROOT` and
+queues the existing reader/OCR worker. For a static HTML form, it returns the
+visible field labels and basic constraints without interacting with the form.
+You can also provide an allowed local folder; the agent can choose to scan it
+and inspect the resulting pages.
+
+```sh
+curl -X POST "http://127.0.0.1:8000/api/v1/agent/intake" \
+  -H "X-API-Key: $FILLO_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url":"https://example.org/purchase-order.pdf",
+    "goal":"Inspect this purchase order and report what Fillo could read",
+    "source_path":"/home/user/documents/application"
+  }'
+```
+
+`source_path` is optional and must be inside `ALLOWED_SOURCE_ROOTS`. The agent
+uses LangChain tool calls to inspect the submitted link, start scans, check job
+status, list files, and read extracted pages. The response includes the agent's
+summary and a tool activity list. Link fetching is limited to public HTTP(S)
+hosts, supported document types, four redirects, and 20 MB per download.
+Page text and static form metadata returned to the agent are sent to Anthropic
+for the intake response. Fillo does not configure LangSmith tracing. Downloaded
+documents remain under `REMOTE_SOURCE_ROOT`, and extracted pages remain in
+MongoDB; delete/retention controls are a later phase.
+
+This is an intake-only agent: dynamic pages that require JavaScript or sign-in
+may not expose their fields; scanned documents still use the configured OCR
+engine. The agent never fills or submits a form in this phase.

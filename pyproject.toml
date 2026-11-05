@@ -10,6 +10,8 @@ requires-python = ">=3.12"
 dependencies = [
     "anthropic>=2.4.0",
     "fastapi>=0.162.0",
+    "langchain>=1.0.0",
+    "langchain-anthropic>=1.0.0",
     "pillow>=13.0.0",
     "pillow-heif>=1.8.1",
     "playwright>=1.64.1",
