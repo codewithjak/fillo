@@ -42,12 +42,7 @@ def resolve_allowed_source_root(raw_path: str) -> Path:
     return root
 
 
-async def register_source_root(
-    root: Path,
-    schedule_job: Callable[[str, str], None],
-    *,
-    metadata: dict | None = None,
-) -> dict:
+async def register_source_root(root: Path, schedule_job: Callable[[str, str], None],*,metadata: dict | None = None,) -> dict:
     """Create source/file/job records and schedule the existing ingestion worker."""
     files = await asyncio.to_thread(scan_folder, root)
     if not files:

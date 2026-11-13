@@ -6,9 +6,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env")
-    MONGO_URI:str
-    PORT:int
-    db:str
+    MONGO_URI: str
+    PORT: int
+    db: str
     api_key: SecretStr
     allowed_source_roots: list[Path] = Field(default_factory=list)
     ocr_engine: Literal["tesseract", "claude"] = "tesseract"
@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     agent_model: str = "claude-sonnet-5"
     remote_source_root: Path = Path("data/remote-sources")
+
+    # --- agent model switching ---
+    agent_provider: Literal["anthropic", "ollama"] = "anthropic"
+    ollama_model: str = "llama3.1"
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_num_ctx: int = 8192
+    agent_temperature: float = 0
 
     @field_validator("api_key")
     @classmethod

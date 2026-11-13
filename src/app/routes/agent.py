@@ -20,7 +20,7 @@ router = APIRouter(
 
 @router.post("/intake", response_model=AgentIntakeOutput)
 async def agentic_intake(body: AgentIntakeInput, request: Request) -> AgentIntakeOutput:
-    if not settings.anthropic_api_key:
+    if settings.agent_provider == "anthropic" and not settings.anthropic_api_key:
         raise HTTPException(503, "The intake agent is unavailable; configure ANTHROPIC_API_KEY")
 
     source_path = None

@@ -11,7 +11,8 @@ from urllib.parse import unquote, urlsplit
 
 from langchain.agents import create_agent
 from langchain.tools import tool
-from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models import BaseChatModel
+from app.agent.llm import get_chat_model
 
 from app.config import settings
 from app.db import db
@@ -92,6 +93,9 @@ def build_intake_agent(
     source_path: str | None,
     schedule_job: Callable[[str, str], None],
     activity: list[dict],
+    model: BaseChatModel | None = None,
+    system_prompt: str = INTAKE_SYSTEM_PROMPT,
+    checkpointer=None,
 ):
     """Build a request-scoped agent; all tools are bound to the user's inputs."""
     known_jobs: dict[str, str] = {}  # job_id -> source_id
@@ -297,10 +301,14 @@ def build_intake_agent(
 
     tools.extend([get_scan_status, list_scanned_files, read_extracted_pages])
 
-    if not settings.anthropic_api_key:
-        raise ValueError("ANTHROPIC_API_KEY is required to run the intake agent")
-    model = ChatAnthropic(model=settings.agent_model, api_key=settings.anthropic_api_key)
-    agent = create_agent(model=model, tools=tools, system_prompt=INTAKE_SYSTEM_PROMPT)
+    if model is None:
+        model = get_chat_model()
+    agent = create_agent(
+        model=model,
+        tools=tools,
+        system_prompt=system_prompt,
+        checkpointer=checkpointer,
+    )
     user_message = (
         f"Goal: {goal}\nSubmitted link: {_safe_link_label(url)}\n"
         "Inspect the submitted link and use Fillo's intake tools to read it."
@@ -318,12 +326,15 @@ async def run_intake_agent(
     schedule_job: Callable[[str, str], None],
     activity: list[dict],
 ) -> str:
-    agent, user_message = build_intake_agent(
+    from app.agentic.agent import create_intake_agent
+
+    agent, user_message = create_intake_agent(
         url=url,
         goal=goal,
         source_path=source_path,
         schedule_job=schedule_job,
         activity=activity,
+        thread_id=uuid.uuid4().hex,
     )
     result = await agent.ainvoke(
         {"messages": [{"role": "user", "content": user_message}]},
