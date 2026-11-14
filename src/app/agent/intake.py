@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 MAX_PAGE_TEXT_FOR_MODEL = 18_000
 MAX_PAGES_FOR_MODEL = 30
 JOB_WAIT_SECONDS = 8
+MAX_JOB_WAIT_SECONDS = 60
+MAX_AGENT_PAGE_TEXT_CHARS = 36_000
 
 INTAKE_SYSTEM_PROMPT = """You are Fillo's document-intake agent. Your job is limited to inspecting a user-provided link and, when supplied, scanning the user's explicitly selected local folder.
 
@@ -96,6 +98,7 @@ def build_intake_agent(
     model: BaseChatModel | None = None,
     system_prompt: str = INTAKE_SYSTEM_PROMPT,
     checkpointer=None,
+    allow_tool_calls: bool = True,
 ):
     """Build a request-scoped agent; all tools are bound to the user's inputs."""
     known_jobs: dict[str, str] = {}  # job_id -> source_id
@@ -305,17 +308,26 @@ def build_intake_agent(
         model = get_chat_model()
     agent = create_agent(
         model=model,
-        tools=tools,
+        tools=tools if allow_tool_calls else [],
         system_prompt=system_prompt,
         checkpointer=checkpointer,
     )
     user_message = (
         f"Goal: {goal}\nSubmitted link: {_safe_link_label(url)}\n"
-        "Inspect the submitted link and use Fillo's intake tools to read it."
+        +
+        (
+            "Inspect the submitted link and use Fillo's intake tools to read it."
+            if allow_tool_calls
+            else "Propose matches only from the verified intake evidence included here."
+        )
     )
     if source_path is not None:
-        user_message += " A local folder was also selected for scanning; scan it if it helps with the user's goal."
-    return agent, user_message
+        user_message += (
+            " A local folder was also selected for scanning; scan it if it helps with the user's goal."
+            if allow_tool_calls
+            else " A local folder was selected and its scan results are included when available."
+        )
+    return agent, user_message, tools
 
 
 async def run_intake_agent(
@@ -328,7 +340,7 @@ async def run_intake_agent(
 ) -> str:
     from app.agentic.agent import create_intake_agent
 
-    agent, user_message = create_intake_agent(
+    agent, user_message, tools = create_intake_agent(
         url=url,
         goal=goal,
         source_path=source_path,
@@ -336,8 +348,173 @@ async def run_intake_agent(
         activity=activity,
         thread_id=uuid.uuid4().hex,
     )
+
+    tool_map = {intake_tool.name: intake_tool for intake_tool in tools}
+
+    async def call_tool(name: str, arguments: dict | None = None) -> dict:
+        intake_tool = tool_map.get(name)
+        if intake_tool is None:
+            message = f"Required intake tool is unavailable: {name}"
+            _trace(activity, name, "failed", error=message)
+            return {"error": message}
+        try:
+            raw_result = await intake_tool.ainvoke(arguments or {})
+        except Exception as error:
+            logger.exception("Required intake tool %s failed", name)
+            message = f"{name} failed: {error}"
+            _trace(activity, name, "failed", error=str(error))
+            return {"error": message}
+        if isinstance(raw_result, str):
+            try:
+                payload = json.loads(raw_result)
+            except json.JSONDecodeError:
+                return {"result": raw_result}
+            return payload if isinstance(payload, dict) else {"result": payload}
+        return raw_result if isinstance(raw_result, dict) else {"result": raw_result}
+
+    sources_evidence: list[dict] = []
+    evidence: dict[str, object] = {"link": {}, "sources": sources_evidence}
+    link_result = await call_tool("inspect_submitted_link")
+    evidence["link"] = link_result
+
+    source_jobs: dict[str, str] = {}
+    if link_result.get("source_id") and link_result.get("job_id"):
+        source_jobs[link_result["source_id"]] = link_result["job_id"]
+
+    if source_path is not None:
+        folder_result = await call_tool("scan_selected_folder")
+        evidence["selected_folder"] = folder_result
+        if folder_result.get("source_id") and folder_result.get("job_id"):
+            source_jobs[folder_result["source_id"]] = folder_result["job_id"]
+
+    deadline = asyncio.get_running_loop().time() + MAX_JOB_WAIT_SECONDS
+    unresolved_jobs: list[dict] = []
+    remaining_evidence_chars = MAX_AGENT_PAGE_TEXT_CHARS
+    evidence_was_truncated = False
+    for source_id, job_id in source_jobs.items():
+        job_timed_out = False
+        while True:
+            job_status = await call_tool("get_scan_status", {"job_id": job_id})
+            state = job_status.get("status")
+            if state not in {"pending", "running"}:
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                job_timed_out = True
+                break
+            await asyncio.sleep(0.25)
+
+        source_result: dict[str, object] = {
+            "source_id": source_id,
+            "job_id": job_id,
+            "job_status": job_status,
+            "timed_out": job_timed_out,
+        }
+        files_result = await call_tool("list_scanned_files", {"source_id": source_id})
+        source_result["files"] = files_result
+
+        files = files_result.get("files", [])
+        page_results: list[dict] = []
+        for file_result in files if isinstance(files, list) else []:
+            if not isinstance(file_result, dict) or file_result.get("status") != "done":
+                continue
+            rel_path = file_result.get("rel_path")
+            if not isinstance(rel_path, str):
+                continue
+            page_result = await call_tool(
+                "read_extracted_pages",
+                {"source_id": source_id, "rel_path": rel_path},
+            )
+            pages = page_result.get("pages", [])
+            for page in pages if isinstance(pages, list) else []:
+                if not isinstance(page, dict):
+                    continue
+                text = page.get("text", "")
+                if not isinstance(text, str):
+                    text = str(text)
+                excerpt = text[:remaining_evidence_chars]
+                remaining_evidence_chars -= len(excerpt)
+                page["text"] = excerpt
+                if len(excerpt) < len(text):
+                    page["truncated"] = True
+                    evidence_was_truncated = True
+            page_results.append({"file": file_result, "extraction": page_result})
+        source_result["extracted_pages"] = page_results
+        sources_evidence.append(source_result)
+        state = job_status.get("status")
+        if job_timed_out or state not in {"completed", "partial_failure", "failed"}:
+            unresolved_jobs.append({
+                "source_id": source_id,
+                "job_id": job_id,
+                "status": state or job_status.get("error", "unknown"),
+            })
+
+    evidence["extraction_text_truncated"] = evidence_was_truncated
+
+    form_fields = link_result.get("fields") if link_result.get("resource_type") == "online_form" else None
+    has_extracted_text = any(
+        isinstance(page, dict)
+        and isinstance(page.get("text"), str)
+        and bool(page["text"].strip())
+        for source in sources_evidence
+        for file_evidence in source.get("extracted_pages", [])
+        if isinstance(file_evidence, dict)
+        for page in file_evidence.get("extraction", {}).get("pages", [])
+        if isinstance(page, dict)
+    )
+    if not form_fields:
+        return (
+            "Fillo could not confirm accessible form fields from the submitted link, "
+            "so it did not generate field matches. The link inspection result was: "
+            f"{json.dumps(link_result, ensure_ascii=False)}"
+        )
+    if unresolved_jobs:
+        return (
+            "Document processing is not complete, so Fillo did not generate field "
+            "matches. Check these jobs and retry: "
+            f"{json.dumps(unresolved_jobs, ensure_ascii=False)}"
+        )
+    if not has_extracted_text:
+        document_errors = []
+        folder_error = evidence.get("selected_folder", {}).get("error")
+        if folder_error:
+            document_errors.append(f"Selected folder scan: {folder_error}")
+        for source in sources_evidence:
+            files = source.get("files", {})
+            if not isinstance(files, dict):
+                files = {}
+            if files.get("error"):
+                document_errors.append(str(files["error"]))
+            for file_result in files.get("files", []):
+                if isinstance(file_result, dict) and file_result.get("status") in {"failed", "skipped"}:
+                    name = file_result.get("name") or file_result.get("rel_path") or "Unknown file"
+                    detail = file_result.get("error") or file_result.get("status")
+                    document_errors.append(f"{name}: {detail}")
+            for file_evidence in source.get("extracted_pages", []):
+                if not isinstance(file_evidence, dict):
+                    continue
+                extraction = file_evidence.get("extraction", {})
+                if isinstance(extraction, dict) and extraction.get("error"):
+                    file_result = file_evidence.get("file", {})
+                    name = file_result.get("name", "Unknown file") if isinstance(file_result, dict) else "Unknown file"
+                    document_errors.append(f"{name}: {extraction['error']}")
+        error_summary = (
+            " Document issues: " + "; ".join(document_errors)
+            if document_errors
+            else ""
+        )
+        return (
+            "Fillo inspected the form, but no completed document pages were available "
+            f"to support matching. No field values were proposed.{error_summary}"
+        )
+
+    evidence_message = (
+        f"{user_message}\nVerified intake evidence (tool outputs):\n"
+        f"{json.dumps(evidence, ensure_ascii=False)}\n\n"
+        "Propose matches only from this evidence. Include the source file, page, "
+        "and supporting text for every proposed value."
+    )
     result = await agent.ainvoke(
-        {"messages": [{"role": "user", "content": user_message}]},
+        {"messages": [{"role": "user", "content": evidence_message}]},
         config={"recursion_limit": 16},
     )
     messages = result.get("messages", [])
