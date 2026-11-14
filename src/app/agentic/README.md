@@ -18,9 +18,13 @@ document evidence.
    scheduler, and activity log are bound to that request; the model cannot
    substitute another URL or filesystem path. The matching LLM is configured
    without tools because the application must complete the intake steps first.
-3. **Inspect the submitted URL** — the `inspect_submitted_link` tool uses
-   Fillo's safe URL reader. Static HTML pages return readable text and any
-   accessible form fields. Supported linked documents are saved under
+3. **Inspect and classify the submitted URL** — the `inspect_submitted_link`
+   tool uses Fillo's safe URL reader. HTML pages are rendered in a headless
+   browser, captured as up to eight overlapping viewport screenshots, and OCR'd
+   with the configured OCR engine. OCR results include screenshot page number,
+   scroll offset, and confidence when available. Reachable non-HTML resources
+   are classified as images, linked documents, or unsupported; fetch failures
+   are reported as inaccessible. Supported linked files are saved under
    `REMOTE_SOURCE_ROOT` and registered with the existing ingestion service.
 4. **Register selected documents** — when the request includes a local folder,
    `scan_selected_folder` resolves it against the configured allowed roots and
@@ -37,17 +41,17 @@ document evidence.
    registered source and `read_extracted_pages` for each completed file. These
    tools only expose jobs and sources created during the current intake
    request. Page reads are bounded to 30 pages and 18,000 characters per file;
-   extracted page text across all sources is capped at 36,000 characters before
-   it is sent to the LLM.
-7. **Gate the matching step** — the LLM is not called if the link did not
-   expose static online-form fields, a scan is still pending/incomplete, or no
-   non-empty extracted page text is available. Tool errors and incomplete jobs
-   are reported rather than presented as successful extraction.
-8. **Propose field matches** — after the gates pass, the tool-free LLM gets the
-   inspected form fields and verified tool outputs. It proposes values with
-   source file, page, supporting text, and confidence. Unsupported fields
-   should be `no_match`; unclear or conflicting evidence should be `ambiguous`.
-   It must not fill or submit the form.
+   before evaluation, the selected-folder text and web-page OCR are each capped
+   at 12,000 characters to bound the LLM input.
+7. **Gate the evaluation step** — the LLM receives OCR text from the rendered
+   URL and extracted pages from the selected folder or linked files. It is not
+   called when there is no readable evidence, a scan is pending/incomplete, or
+   a selected folder produced no completed document pages.
+8. **Evaluate the request** — the tool-free LLM uses the goal and evidence to
+   identify visible form fields from screenshot OCR and propose supported
+   matches. It can also evaluate a memo, receipt, or other page according to
+   the user's goal. It must cite the URL screenshot or source file and page,
+   mark unclear/conflicting values `ambiguous`, and must not fill or submit.
 9. **Return a response** — the API returns the LLM's proposal and a tool
    activity log showing which intake operations completed or failed.
 
@@ -56,6 +60,7 @@ document evidence.
 | Work | Owner |
 | --- | --- |
 | Fetch and inspect the submitted URL | `inspect_submitted_link` tool |
+| Render HTML pages and OCR viewport screenshots | Browser capture plus configured OCR engine |
 | Validate and catalog a selected folder | `scan_selected_folder` tool and ingestion service |
 | Run OCR or text extraction | Existing ingestion worker and readers |
 | Read job/file/page records | Application invokes the status, file-list, and extracted-page tools |
@@ -73,8 +78,12 @@ or separate API requests.
 
 ## Current boundaries
 
-- HTML inspection is static; pages requiring JavaScript, authentication, or
-  browser interaction may not expose their fields.
+- HTML is rendered without interacting with forms. Only the first eight
+  viewport screenshots are OCR'd; pages that require authentication, blocked
+  requests, POST-based data, or later interaction may not expose all content.
+- Only public HTTP/HTTPS URLs on standard ports are fetched. Redirects, download
+  size, and connection time are bounded; inaccessible and unsupported outcomes
+  are returned explicitly.
 - Only file types supported by the existing readers are ingested.
 - Document text, OCR output, and form labels are untrusted content, not agent
   instructions.

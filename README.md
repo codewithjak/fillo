@@ -5,14 +5,16 @@ provides authenticated API endpoints for tracking ingestion jobs and reading the
 extracted pages.
 
 The initial LangChain intake agent can also inspect a user-provided public link.
-It identifies static HTML forms and queues linked supported documents through
-the same ingestion worker. This first agent slice reads and reports on inputs;
-it does not extract accepted facts, match fields, fill forms, or submit them.
+It renders HTML pages in a headless browser, OCRs visible screenshots, and
+queues supported linked documents through the existing ingestion worker. It
+uses the URL and selected-folder evidence to evaluate the user's goal and
+propose matches; it does not fill or submit forms.
 
 ## Requirements
 
 - Python 3.12 or newer
 - MongoDB
+- Playwright Chromium for rendering web pages
 - Tesseract OCR for scanned PDFs and images when `OCR_ENGINE=tesseract`
 - `uv` to install and run the project
 
@@ -49,6 +51,7 @@ expose it over a network.
 
 ```sh
 uv sync
+uv run playwright install chromium
 uv run fillo
 ```
 
@@ -102,12 +105,13 @@ service starts. Run one Fillo server process against a database at a time.
 
 ## Agentic intake
 
-Give the intake agent a public link to a supported document or an online form.
-For a document link, Fillo downloads the file into `REMOTE_SOURCE_ROOT` and
-queues the existing reader/OCR worker. For a static HTML form, it returns the
-visible field labels and basic constraints without interacting with the form.
-You can also provide an allowed local folder; the agent can choose to scan it
-and inspect the resulting pages.
+Give the intake agent a public web page or supported document link.
+For an HTML link, Fillo renders the page in Playwright, captures up to eight
+overlapping viewport screenshots, and OCRs the visible content. For a supported
+document or image link, Fillo downloads the resource into `REMOTE_SOURCE_ROOT`
+and queues the existing reader/OCR worker. You can also provide an allowed
+local folder for scanning; the LLM evaluates the URL and extracted file
+evidence against the request goal.
 
 ```sh
 curl -X POST "http://127.0.0.1:8000/api/v1/agent/intake" \
@@ -120,16 +124,17 @@ curl -X POST "http://127.0.0.1:8000/api/v1/agent/intake" \
   }'
 ```
 
-`source_path` is optional and must be inside `ALLOWED_SOURCE_ROOTS`. The agent
-uses LangChain tool calls to inspect the submitted link, start scans, check job
-status, list files, and read extracted pages. The response includes the agent's
-summary and a tool activity list. Link fetching is limited to public HTTP(S)
-hosts, supported document types, four redirects, and 20 MB per download.
-Page text and static form metadata returned to the agent are sent to Anthropic
-for the intake response. Fillo does not configure LangSmith tracing. Downloaded
+`source_path` is optional and must be inside `ALLOWED_SOURCE_ROOTS`. Application
+orchestration invokes the LangChain tools to inspect the link, start scans,
+check job status, list files, and read extracted pages. The response includes
+the agent's evaluation and a tool activity list. Link and browser subresource
+fetching is limited to public HTTP(S) hosts on standard ports, bounded redirects,
+requests, screenshots, and download sizes. OCR text is sent to the configured
+agent/OCR providers. Fillo does not configure LangSmith tracing. Downloaded
 documents remain under `REMOTE_SOURCE_ROOT`, and extracted pages remain in
 MongoDB; delete/retention controls are a later phase.
 
-This is an intake-only agent: dynamic pages that require JavaScript or sign-in
-may not expose their fields; scanned documents still use the configured OCR
-engine. The agent never fills or submits a form in this phase.
+This is an intake-only agent: pages requiring sign-in, blocked requests, or
+POST-based loading may not expose all content. The agent never fills or submits
+a form in this phase. Install the Playwright browser after syncing dependencies:
+`uv run playwright install chromium`.

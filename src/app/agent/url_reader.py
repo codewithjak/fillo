@@ -1,10 +1,11 @@
+import asyncio
+import html
 import http.client
 import ipaddress
 import re
 import socket
 import ssl
 from dataclasses import dataclass
-from html.parser import HTMLParser
 from urllib.parse import SplitResult, urljoin, urlsplit
 
 
@@ -29,6 +30,13 @@ class FetchedResource:
     body: bytes
     content_type: str
     final_url: str
+
+
+@dataclass
+class PageScreenshot:
+    page: int
+    scroll_y: int
+    png: bytes
 
 
 def _resolve_public_ip(host: str, port: int) -> str:
@@ -83,7 +91,11 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
 
 
-def fetch_public_url(url: str) -> FetchedResource:
+def fetch_public_url(
+    url: str,
+    *,
+    max_download_bytes: int = MAX_DOWNLOAD_BYTES,
+) -> FetchedResource:
     """Fetch one user-supplied public URL with pinned DNS and bounded redirects/body size."""
     current = url
     for redirect_number in range(MAX_REDIRECTS + 1):
@@ -133,11 +145,11 @@ def fetch_public_url(url: str) -> FetchedResource:
                     raise ValueError("The link returned an invalid content length") from e
                 if declared_length < 0:
                     raise ValueError("The link returned an invalid content length")
-                if declared_length > MAX_DOWNLOAD_BYTES:
-                    raise ValueError("The linked file is larger than the 20 MB limit")
-            body = response.read(MAX_DOWNLOAD_BYTES + 1)
-            if len(body) > MAX_DOWNLOAD_BYTES:
-                raise ValueError("The linked file is larger than the 20 MB limit")
+                if declared_length > max_download_bytes:
+                    raise ValueError("The linked resource exceeds the download size limit")
+            body = response.read(max_download_bytes + 1)
+            if len(body) > max_download_bytes:
+                raise ValueError("The linked resource exceeds the download size limit")
             content_type = response.getheader("Content-Type", "application/octet-stream")
             return FetchedResource(
                 body=body,
@@ -149,139 +161,154 @@ def fetch_public_url(url: str) -> FetchedResource:
     raise ValueError("The link could not be fetched")
 
 
-class BasicHTMLParser(HTMLParser):
-    """Extract visible text and static form metadata without executing page scripts."""
+MAX_WEB_PAGE_SCREENSHOTS = 8
+MAX_WEB_PAGE_REQUESTS = 60
+MAX_WEB_PAGE_BYTES = 40 * 1024 * 1024
 
-    _IGNORED_TAGS = {"script", "style", "noscript", "svg", "template"}
-    _NON_INPUT_TYPES = {"hidden", "submit", "button", "reset", "image"}
-    _BLOCK_TAGS = {
-        "address", "article", "blockquote", "br", "dd", "div", "dl", "dt",
-        "fieldset", "figcaption", "footer", "form", "h1", "h2", "h3", "h4",
-        "h5", "h6", "header", "hr", "li", "main", "ol", "p", "section",
-        "table", "tbody", "td", "th", "thead", "tr", "ul",
+
+def _add_base_url(body: bytes, base_url: str) -> bytes:
+    base_tag = f'<base href="{html.escape(base_url, quote=True)}">'.encode("utf-8")
+    head = re.search(rb"<head\b[^>]*>", body, re.IGNORECASE)
+    if head:
+        return body[:head.end()] + base_tag + body[head.end():]
+    return b"<head>" + base_tag + b"</head>" + body
+
+
+def looks_like_html(content_type: str, body: bytes) -> bool:
+    if content_type in {"text/html", "application/xhtml+xml"}:
+        return True
+    sample = body[:4096].decode("utf-8", errors="ignore").lstrip("\ufeff\t\r\n ")
+    while sample.startswith("<!--"):
+        comment_end = sample.find("-->")
+        if comment_end < 0:
+            return False
+        sample = sample[comment_end + 3 :].lstrip("\t\r\n ")
+    return sample[:32].lower().startswith(("<!doctype html", "<html", "<head", "<body"))
+
+
+async def capture_public_page(
+    fetched: FetchedResource,
+) -> tuple[str, list[PageScreenshot], bool]:
+    """Render a safely fetched HTML page and capture a bounded set of visible viewports."""
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as e:
+        raise RuntimeError("Playwright is required to render web pages") from e
+
+    request_state = {
+        "count": 1,
+        "bytes": len(fetched.body),
+        "initial_pending": True,
     }
+    fetch_semaphore = asyncio.Semaphore(4)
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context(
+                viewport={"width": 1365, "height": 900},
+                device_scale_factor=1,
+                service_workers="block",
+            )
+            async def fulfill_request(route) -> None:
+                request = route.request
+                if urlsplit(request.url).scheme.lower() not in {"http", "https"}:
+                    await route.abort("blockedbyclient")
+                    return
+                if request_state["count"] >= MAX_WEB_PAGE_REQUESTS:
+                    await route.abort("blockedbyclient")
+                    return
+                request_state["count"] += 1
+                origin = request.headers.get("origin")
+                cors_headers = {
+                    "access-control-allow-origin": origin or "*",
+                    "access-control-allow-methods": "GET, HEAD, OPTIONS",
+                    "access-control-allow-headers": request.headers.get(
+                        "access-control-request-headers", "*"
+                    ),
+                }
+                if request.method == "OPTIONS":
+                    await route.fulfill(status=204, headers=cors_headers)
+                    return
+                if request.method not in {"GET", "HEAD"}:
+                    await route.abort("blockedbyclient")
+                    return
 
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.title_parts: list[str] = []
-        self.text_parts: list[str] = []
-        self.labels: dict[str, list[str]] = {}
-        self.fields: list[dict] = []
-        self._in_title = False
-        self._ignored_depth = 0
-        self._ignored_stack: list[str] = []
-        self._label_for: str | None = None
-        self._label_parts: list[str] = []
-        self._label_field_start: int | None = None
-        self._active_select: int | None = None
-        self._active_option: int | None = None
+                initial_url = fetched.final_url.split("#", 1)[0]
+                request_url = request.url.split("#", 1)[0]
+                if (
+                    request_state["initial_pending"]
+                    and request.is_navigation_request()
+                    and request_url == initial_url
+                ):
+                    request_state["initial_pending"] = False
+                    resource = fetched
+                    body = _add_base_url(resource.body, fetched.final_url)
+                    content_type = "text/html; charset=utf-8"
+                else:
+                    try:
+                        async with fetch_semaphore:
+                            resource = await asyncio.to_thread(
+                                fetch_public_url,
+                                request.url,
+                                max_download_bytes=8 * 1024 * 1024,
+                            )
+                    except Exception:
+                        await route.abort("blockedbyclient")
+                        return
+                    request_state["bytes"] += len(resource.body)
+                    if request_state["bytes"] > MAX_WEB_PAGE_BYTES:
+                        await route.abort("blockedbyclient")
+                        return
+                    body = resource.body
+                    content_type = resource.content_type
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attributes = {key: value or "" for key, value in attrs}
-        if tag in self._IGNORED_TAGS:
-            self._ignored_depth += 1
-            self._ignored_stack.append(tag)
-            return
-        if self._ignored_depth:
-            return
-        if tag in self._BLOCK_TAGS:
-            self.text_parts.append("\n")
-        if tag == "title":
-            self._in_title = True
-        elif tag == "label":
-            self._label_for = attributes.get("for") or None
-            self._label_parts = []
-            self._label_field_start = len(self.fields)
-        elif tag == "input":
-            input_type = (attributes.get("type") or "text").lower()
-            if input_type not in self._NON_INPUT_TYPES:
-                self.fields.append(self._field(attributes, input_type))
-        elif tag == "textarea":
-            self.fields.append(self._field(attributes, "textarea"))
-        elif tag == "select":
-            self.fields.append(self._field(attributes, "select"))
-            self.fields[-1]["options"] = []
-            self._active_select = len(self.fields) - 1
-        elif tag == "option" and self._active_select is not None:
-            self._active_option = self._active_select
+                headers = {"content-type": content_type, **cors_headers}
+                await route.fulfill(
+                    status=200,
+                    body=b"" if request.method == "HEAD" else body,
+                    headers=headers,
+                )
 
-    def handle_endtag(self, tag: str) -> None:
-        if self._ignored_depth:
-            if self._ignored_stack and self._ignored_stack[-1] == tag:
-                self._ignored_stack.pop()
-                self._ignored_depth -= 1
-            return
-        if tag in self._BLOCK_TAGS:
-            self.text_parts.append("\n")
-        if tag == "title":
-            self._in_title = False
-        elif tag == "label":
-            label = " ".join(" ".join(self._label_parts).split())
-            if self._label_for and label:
-                self.labels[self._label_for] = [label]
-            elif (label and self._label_field_start is not None
-                  and len(self.fields) > self._label_field_start):
-                self.fields[self._label_field_start]["label"] = label
-            self._label_for = None
-            self._label_parts = []
-            self._label_field_start = None
-        elif tag == "select":
-            self._active_select = None
-            self._active_option = None
-        elif tag == "option":
-            self._active_option = None
+            async def block_websocket(websocket) -> None:
+                await websocket.close(
+                    code=1008,
+                    reason="WebSocket access is disabled during page inspection",
+                )
 
-    def handle_data(self, data: str) -> None:
-        if self._ignored_depth:
-            return
-        text = data.strip()
-        if not text:
-            return
-        if self._in_title:
-            self.title_parts.append(text)
-        self.text_parts.append(text)
-        if self._label_for is not None:
-            self._label_parts.append(text)
-        if self._active_option is not None:
-            options = self.fields[self._active_option]["options"]
-            if len(options) < 30:
-                options.append(text)
+            await context.route("**/*", fulfill_request)
+            await context.route_web_socket("**/*", block_websocket)
+            page = await context.new_page()
+            await page.goto(fetched.final_url, wait_until="domcontentloaded", timeout=20_000)
+            await page.wait_for_timeout(2000)
+            title = await page.title()
 
-    def _field(self, attrs: dict[str, str], field_type: str) -> dict:
-        return {
-            "name": attrs.get("name") or None,
-            "id": attrs.get("id") or None,
-            "label": attrs.get("aria-label") or None,
-            "type": field_type,
-            "required": "required" in attrs,
-            "placeholder": attrs.get("placeholder") or None,
-            "options": [],
-            "constraints": {
-                key: attrs[key]
-                for key in ("min", "max", "minlength", "maxlength", "pattern", "step",
-                            "multiple", "accept", "autocomplete")
-                if key in attrs
-            },
-        }
+            screenshots: list[PageScreenshot] = []
+            reached_bottom = False
+            for screenshot_number in range(1, MAX_WEB_PAGE_SCREENSHOTS + 1):
+                position = await page.evaluate(
+                    """() => ({
+                        y: Math.round(window.scrollY),
+                        height: window.innerHeight,
+                        total: Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)
+                    })"""
+                )
+                screenshots.append(PageScreenshot(
+                    page=screenshot_number,
+                    scroll_y=position["y"],
+                    png=await page.screenshot(type="png", full_page=False, animations="disabled"),
+                ))
+                if position["y"] + position["height"] >= position["total"] - 2:
+                    reached_bottom = True
+                    break
+                next_y = min(
+                    position["y"] + max(300, position["height"] - 120),
+                    position["total"] - position["height"],
+                )
+                if next_y <= position["y"]:
+                    break
+                await page.evaluate("y => window.scrollTo(0, y)", next_y)
+                await page.wait_for_timeout(500)
 
-    def result(self) -> dict:
-        for field in self.fields:
-            if not field["label"] and field["id"]:
-                labels = self.labels.get(field["id"])
-                if labels:
-                    field["label"] = labels[0]
-        title = " ".join(" ".join(self.title_parts).split())[:300]
-        pieces: list[str] = []
-        for part in self.text_parts:
-            if part == "\n":
-                pieces.append("\n")
-                continue
-            value = " ".join(part.split())
-            if not value:
-                continue
-            if pieces and pieces[-1] not in {" ", "\n"}:
-                pieces.append(" ")
-            pieces.append(value)
-        text = re.sub(r" *\n *", "\n", "".join(pieces))
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
-        return {"title": title or None, "text": text[:16000], "fields": self.fields[:100]}
+            return title, screenshots, not reached_bottom
+        finally:
+            await browser.close()
