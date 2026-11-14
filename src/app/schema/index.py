@@ -4,6 +4,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
+from app.agent.schemas import GoalPlan
+
 
 class DocOutput(BaseModel):
     source_id: str
@@ -52,5 +54,6 @@ class AgentToolActivity(BaseModel):
 
 class AgentIntakeOutput(BaseModel):
     run_id: str
+    goal_plan: GoalPlan
     response: str
     tool_activity: list[AgentToolActivity]

@@ -33,7 +33,7 @@ async def agentic_intake(body: AgentIntakeInput, request: Request) -> AgentIntak
     run_id = uuid.uuid4().hex
     activity: list[dict] = []
     try:
-        response = await run_intake_agent(
+        goal_plan, response = await run_intake_agent(
             url=str(body.url),
             goal=body.goal,
             source_path=source_path,
@@ -44,4 +44,9 @@ async def agentic_intake(body: AgentIntakeInput, request: Request) -> AgentIntak
         logger.exception("Agent intake run %s failed", run_id)
         raise HTTPException(502, "The intake agent could not complete this request") from e
 
-    return AgentIntakeOutput(run_id=run_id, response=response, tool_activity=activity)
+    return AgentIntakeOutput(
+        run_id=run_id,
+        goal_plan=goal_plan,
+        response=response,
+        tool_activity=activity,
+    )
