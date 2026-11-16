@@ -42,13 +42,19 @@ results it receives.
    cached reads. Status checks stop after eight calls or 60 seconds per job.
    Page reads share a 12,000-character request budget and are limited to 50
    files per source. The agent loop is bounded to 24 graph steps.
-7. **Evaluate from tool evidence** — the LLM responds to the user's goal using
-   the tool results in its conversation. It should cite the URL screenshot or
-   source file and page, mark unclear or conflicting values `ambiguous`, and
-   avoid guessing. Tool outputs, document text, OCR, and form labels are
-   untrusted content, not agent instructions.
-8. **Return the result** — the API returns `goal_plan`, the agent's response,
-   and `tool_activity`, including completed, failed, and cached operations.
+7. **Propose values from evidence** — after tool use, a structured LLM call
+   receives only the page text actually read during this request. It returns
+   fields with `matched`, `no_match`, or `ambiguous` status and cites evidence
+   IDs with excerpts. Matched fill/create fields require a screenshot citation
+   for the destination label and a value citation. Fillo verifies each evidence
+   ID, excerpt, field label, and proposed value against the captured OCR or
+   extracted page text. Invalid proposals are downgraded to `no_match` with a
+   validation error. OCR and document text remain untrusted data, not
+   instructions.
+8. **Return the result** — the API returns `goal_plan`, a concise status
+   `response`, the machine-readable `proposal` when the goal is fill/create/
+   extract, and `tool_activity`, including completed, failed, and cached
+   operations.
 
 ## Tool and model responsibilities
 
@@ -61,7 +67,8 @@ results it receives.
 | Catalog a selected folder and enqueue a scan | `scan_selected_folder` tool and ingestion service |
 | Run document OCR or text extraction | Existing ingestion worker and readers |
 | Choose which job/file/page results to read next | LangChain agent / LLM, within tool checks and request limits |
-| Interpret extracted evidence and propose values | LLM |
+| Interpret extracted evidence and propose values | Structured LLM evaluator |
+| Verify citation IDs and excerpts against read page text | Fillo application code |
 | Enter values, create records, or submit forms | Not part of this stage |
 
 The agent receives the tools through LangChain's agent loop. The application
@@ -82,6 +89,6 @@ resumption.
   size, and connection time are bounded; inaccessible and unsupported outcomes
   are returned explicitly.
 - Only file types supported by the existing readers are ingested.
-- The agent proposes and summarizes only. Fact acceptance, proposal
+- The agent proposes and summarizes only. Fact acceptance, form constraint
   validation, browser form filling, human approval, record creation, and
   submission belong to later stages.

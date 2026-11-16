@@ -28,7 +28,7 @@ def create_intake_agent(
     """Build a tool-enabled agent and return its request-bound tools."""
     from app.agent.intake import build_intake_agent
 
-    agent, user_message, tools = build_intake_agent(
+    agent, user_message, tools, evidence_registry = build_intake_agent(
         url=url,
         goal=goal,
         source_path=source_path,
@@ -38,4 +38,4 @@ def create_intake_agent(
         system_prompt=SYSTEM_PROMPT,
         allow_tool_calls=True,
     )
-    return agent, user_message, tools
+    return agent, user_message, tools, evidence_registry

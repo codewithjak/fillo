@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
-from app.agent.schemas import GoalPlan
+from app.agent.schemas import GoalPlan, IntakeProposal
 
 
 class DocOutput(BaseModel):
@@ -57,3 +57,4 @@ class AgentIntakeOutput(BaseModel):
     goal_plan: GoalPlan
     response: str
     tool_activity: list[AgentToolActivity]
+    proposal: IntakeProposal | None = None
