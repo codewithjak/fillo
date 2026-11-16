@@ -1,24 +1,28 @@
 # Fillo agentic intake flow
 
-This package provides the first agent-assisted intake stage. The API accepts a
-submitted URL and an optional local folder. Fillo's application code invokes
-the required LangChain tools in a fixed sequence so the model cannot skip job
-status, file listing, or page retrieval. After the tool results are verified,
-an LLM interprets the form labels and proposes matches against extracted
-document evidence.
+This is Fillo's goal-planning and document-intake stage. The API accepts a
+submitted URL and an optional local folder. An LLM turns the user's goal into a
+structured plan, then a LangChain agent chooses and calls request-bound intake
+tools. The agent can inspect the URL, decide whether the selected folder is
+relevant, and choose the next status, file-list, or page-read call from the
+results it receives.
 
 ## Request flow
 
 1. **Receive the request** — `POST /api/v1/agent/intake` receives `url`, an
    optional `goal`, and an optional `source_path`. The route checks the API key
    and validates a supplied folder against `ALLOWED_SOURCE_ROOTS`.
-2. **Build the request-scoped agent and tools** — `run_intake_agent` calls
+2. **Plan the goal** — the configured LLM returns a validated `GoalPlan` with
+   `action`, `target_record`, `needed_evidence`, and `expected_result`. Fillo
+   returns this plan in the API response and gives it to the intake agent as
+   intent context, not as document evidence.
+3. **Build the request-bound agent** — `run_intake_agent` calls
    [`agent.py`](agent.py), which delegates tool construction to
-   `app.agent.intake.build_intake_agent`. The URL, selected folder, job
-   scheduler, and activity log are bound to that request; the model cannot
-   substitute another URL or filesystem path. The matching LLM is configured
-   without tools because the application must complete the intake steps first.
-3. **Inspect and classify the submitted URL** — the `inspect_submitted_link`
+   `app.agent.intake.build_intake_agent`. The submitted URL, selected folder,
+   job scheduler, and activity log are bound to that request. Tools only accept
+   source and job IDs created by the same request; the model cannot substitute
+   another URL or filesystem path.
+4. **Inspect the URL** — the agent starts with `inspect_submitted_link`. The
    tool uses Fillo's safe URL reader. HTML pages are rendered in a headless
    browser, captured as up to eight overlapping viewport screenshots, and OCR'd
    with the configured OCR engine. OCR results include screenshot page number,
@@ -26,55 +30,48 @@ document evidence.
    are classified as images, linked documents, or unsupported; fetch failures
    are reported as inaccessible. Supported linked files are saved under
    `REMOTE_SOURCE_ROOT` and registered with the existing ingestion service.
-4. **Register selected documents** — when the request includes a local folder,
-   `scan_selected_folder` resolves it against the configured allowed roots and
-   calls `register_source_root`. That function catalogs files, creates job
-   records, and schedules the existing worker. It is also used by Fillo's
-   source API.
-5. **Scan and extract text** — Fillo's scheduled `process_source` worker reads
-   supported files and runs the configured text extraction or OCR pipeline.
-   It saves page text and per-file statuses to MongoDB. The agent does not run
-   OCR itself and does not start a second job.
-6. **Read the extraction results** — application orchestration calls
-   `get_scan_status` until each job reaches a terminal state or the 60-second
-   overall wait limit is reached. It then calls `list_scanned_files` for each
-   registered source and `read_extracted_pages` for each completed file. These
-   tools only expose jobs and sources created during the current intake
-   request. Page reads are bounded to 30 pages and 18,000 characters per file;
-   before evaluation, the selected-folder text and web-page OCR are each capped
-   at 12,000 characters to bound the LLM input.
-7. **Gate the evaluation step** — the LLM receives OCR text from the rendered
-   URL and extracted pages from the selected folder or linked files. It is not
-   called when there is no readable evidence, a scan is pending/incomplete, or
-   a selected folder produced no completed document pages.
-8. **Evaluate the request** — the tool-free LLM uses the goal and evidence to
-   identify visible form fields from screenshot OCR and propose supported
-   matches. It can also evaluate a memo, receipt, or other page according to
-   the user's goal. It must cite the URL screenshot or source file and page,
-   mark unclear/conflicting values `ambiguous`, and must not fill or submit.
-9. **Return a response** — the API returns the LLM's proposal and a tool
-   activity log showing which intake operations completed or failed.
+5. **Choose source-document work** — after seeing URL results, the agent calls
+   `scan_selected_folder` when the goal needs information from the selected
+   documents. That tool checks the configured allowed roots, catalogs files,
+   creates job records, and schedules the existing worker. If the folder is
+   irrelevant to the goal, the agent can skip it.
+6. **Choose the next read steps** — from tool results, the agent calls
+   `get_scan_status` for returned job IDs, then lists files after a terminal
+   status, and reads relevant completed files. The tools reject unknown job or
+   source IDs, require a listed file path before reading, and avoid repeating
+   cached reads. Status checks stop after eight calls or 60 seconds per job.
+   Page reads share a 12,000-character request budget and are limited to 50
+   files per source. The agent loop is bounded to 24 graph steps.
+7. **Evaluate from tool evidence** — the LLM responds to the user's goal using
+   the tool results in its conversation. It should cite the URL screenshot or
+   source file and page, mark unclear or conflicting values `ambiguous`, and
+   avoid guessing. Tool outputs, document text, OCR, and form labels are
+   untrusted content, not agent instructions.
+8. **Return the result** — the API returns `goal_plan`, the agent's response,
+   and `tool_activity`, including completed, failed, and cached operations.
 
 ## Tool and model responsibilities
 
 | Work | Owner |
 | --- | --- |
-| Fetch and inspect the submitted URL | `inspect_submitted_link` tool |
-| Render HTML pages and OCR viewport screenshots | Browser capture plus configured OCR engine |
-| Validate and catalog a selected folder | `scan_selected_folder` tool and ingestion service |
-| Run OCR or text extraction | Existing ingestion worker and readers |
-| Read job/file/page records | Application invokes the status, file-list, and extracted-page tools |
-| Decide that required intake steps run | Application orchestration, not the LLM |
-| Interpret wording and suggest field-to-evidence matches | LLM, using supplied tool results |
-| Enter values or submit a form | Not part of this stage |
+| Interpret the user's requested outcome | LLM goal planner |
+| Choose and sequence intake tools | LangChain agent / LLM |
+| Enforce allowed URL and folder access | Application and request-bound tools |
+| Fetch a URL, render HTML, and run OCR | `inspect_submitted_link` tool, browser capture, configured OCR engine |
+| Catalog a selected folder and enqueue a scan | `scan_selected_folder` tool and ingestion service |
+| Run document OCR or text extraction | Existing ingestion worker and readers |
+| Choose which job/file/page results to read next | LangChain agent / LLM, within tool checks and request limits |
+| Interpret extracted evidence and propose values | LLM |
+| Enter values, create records, or submit forms | Not part of this stage |
 
-The LangChain tools are invoked with `.ainvoke` by `run_intake_agent`, not by
-an LLM tool-call decision. The link and folder tools keep request-local
-registration results so an accidental repeat cannot fetch or enqueue the same
-input twice during the request. LangGraph's `InMemorySaver` stores matching
-agent state while that agent instance is alive. The current API creates a
-fresh thread per request; this memory is not durable across process restarts
-or separate API requests.
+The agent receives the tools through LangChain's agent loop. The application
+does not invoke status, listing, and page-reading tools in a fixed sequence.
+Tool closures keep request-local results to prevent repeated URL fetches,
+folder scans, file listings, and page reads. Each API request runs a fresh
+agent invocation without a configured checkpointer; LangChain's agent runtime
+uses LangGraph internally, but Fillo does not save graph checkpoints. Agent
+state is limited to that invocation and is not available for later polling or
+resumption.
 
 ## Current boundaries
 
@@ -85,7 +82,6 @@ or separate API requests.
   size, and connection time are bounded; inaccessible and unsupported outcomes
   are returned explicitly.
 - Only file types supported by the existing readers are ingested.
-- Document text, OCR output, and form labels are untrusted content, not agent
-  instructions.
-- The agent proposes matches only. Fact acceptance, validation, browser form
-  filling, human approval, and submission belong to later stages.
+- The agent proposes and summarizes only. Fact acceptance, proposal
+  validation, browser form filling, human approval, record creation, and
+  submission belong to later stages.

@@ -13,6 +13,7 @@ from langchain.agents import create_agent
 from langchain.tools import tool
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.errors import GraphRecursionError
 from app.agent.llm import get_chat_model
 from app.agent.schemas import GoalPlan
 
@@ -40,6 +41,9 @@ JOB_WAIT_SECONDS = 8
 MAX_JOB_WAIT_SECONDS = 60
 MAX_AGENT_PAGE_TEXT_CHARS = 12_000
 MAX_WEB_PAGE_OCR_CHARS = 12_000
+MAX_AGENT_RECURSION = 24
+MAX_FILES_READ_PER_REQUEST = 50
+MAX_STATUS_CHECKS_PER_JOB = 8
 
 GOAL_PLANNER_SYSTEM_PROMPT = """You are Fillo's goal planner. Turn the user's request into a concise structured plan with an action, target record, needed evidence, and expected result.
 
@@ -131,7 +135,6 @@ def build_intake_agent(
     activity: list[dict],
     model: BaseChatModel | None = None,
     system_prompt: str = INTAKE_SYSTEM_PROMPT,
-    checkpointer=None,
     allow_tool_calls: bool = True,
 ):
     """Build a request-scoped agent; all tools are bound to the user's inputs."""
@@ -139,6 +142,12 @@ def build_intake_agent(
     known_sources: set[str] = set()
     link_result: str | None = None
     folder_result: str | None = None
+    status_check_counts: dict[str, int] = {}
+    status_deadlines: dict[str, float] = {}
+    terminal_status_results: dict[str, str] = {}
+    file_list_results: dict[str, str] = {}
+    extracted_page_results: dict[tuple[str, str], str] = {}
+    remaining_page_chars = MAX_AGENT_PAGE_TEXT_CHARS
 
     @tool
     async def inspect_submitted_link() -> str:
@@ -339,7 +348,26 @@ def build_intake_agent(
         """Wait briefly for a scan started during this request and return its job and per-file status counts."""
         if job_id not in known_jobs:
             return _json({"error": "That job was not created by this intake request"})
-        deadline = asyncio.get_running_loop().time() + JOB_WAIT_SECONDS
+        if job_id in terminal_status_results:
+            _trace(activity, "get_scan_status", "cached", job_id=job_id)
+            return _json({
+                "already_checked": True,
+                "job_id": job_id,
+                "note": "Use the terminal status returned earlier in this conversation.",
+            })
+        checks = status_check_counts.get(job_id, 0)
+        if checks >= MAX_STATUS_CHECKS_PER_JOB:
+            return _json({
+                "error": "The per-job status check limit has been reached",
+                "job_id": job_id,
+            })
+        status_check_counts[job_id] = checks + 1
+        loop = asyncio.get_running_loop()
+        deadline = status_deadlines.setdefault(
+            job_id,
+            loop.time() + MAX_JOB_WAIT_SECONDS,
+        )
+        call_deadline = min(deadline, loop.time() + JOB_WAIT_SECONDS)
         job = None
         while True:
             job = await db.jobs.find_one({"_id": job_id}, {"_id": 1, "source_id": 1, "status": 1,
@@ -348,7 +376,7 @@ def build_intake_agent(
                                                              "processing": 1, "error": 1})
             if job is None or job.get("status") not in {"pending", "running"}:
                 break
-            if asyncio.get_running_loop().time() >= deadline:
+            if loop.time() >= call_deadline:
                 break
             await asyncio.sleep(0.4)
         if job is None:
@@ -358,13 +386,30 @@ def build_intake_agent(
             payload["job_id"] = job_id
         _trace(activity, "get_scan_status", "completed" if job else "failed",
                job_id=job_id, job_status=job.get("status") if job else "missing")
-        return _json(payload)
+        result = _json(payload)
+        if job and job.get("status") not in {"pending", "running"}:
+            terminal_status_results[job_id] = result
+        return result
 
     @tool
     async def list_scanned_files(source_id: str) -> str:
         """List file names and statuses for a source created during this intake request."""
         if source_id not in known_sources:
             return _json({"error": "That source was not created by this intake request"})
+        job_id = next(
+            (known_job for known_job, known_source in known_jobs.items()
+             if known_source == source_id),
+            None,
+        )
+        if job_id is not None and job_id not in terminal_status_results:
+            return _json({"error": "Check this source's scan status before listing its files"})
+        if source_id in file_list_results:
+            _trace(activity, "list_scanned_files", "cached", source_id=source_id)
+            return _json({
+                "already_listed": True,
+                "source_id": source_id,
+                "note": "Use the file list returned earlier in this conversation.",
+            })
         cursor = db.files.find(
             {"source_id": source_id},
             {"_id": 0, "name": 1, "rel_path": 1, "status": 1,
@@ -373,13 +418,44 @@ def build_intake_agent(
         files = await cursor.to_list(None)
         _trace(activity, "list_scanned_files", "completed", source_id=source_id,
                file_count=len(files))
-        return _json({"source_id": source_id, "files": files, "truncated": len(files) == 100})
+        result = _json({"source_id": source_id, "files": files, "truncated": len(files) == 100})
+        file_list_results[source_id] = result
+        return result
 
     @tool
     async def read_extracted_pages(source_id: str, rel_path: str) -> str:
         """Read page text for a file in a source created during this intake request."""
+        nonlocal remaining_page_chars
         if source_id not in known_sources:
             return _json({"error": "That source was not created by this intake request"})
+        if source_id not in file_list_results:
+            return _json({"error": "List this source's scanned files before reading a file"})
+        try:
+            listed_files = json.loads(file_list_results[source_id]).get("files", [])
+        except (AttributeError, json.JSONDecodeError):
+            listed_files = []
+        if not any(
+            isinstance(file_result, dict)
+            and file_result.get("rel_path") == rel_path
+            for file_result in listed_files
+        ):
+            return _json({"error": "That file path was not returned by list_scanned_files"})
+        cache_key = (source_id, rel_path)
+        if cache_key in extracted_page_results:
+            _trace(activity, "read_extracted_pages", "cached", source_id=source_id,
+                   rel_path=rel_path)
+            return _json({
+                "already_read": True,
+                "source_id": source_id,
+                "rel_path": rel_path,
+                "note": "Use the extracted pages returned earlier in this conversation.",
+            })
+        reads_for_source = sum(
+            1 for cached_source, _ in extracted_page_results
+            if cached_source == source_id
+        )
+        if reads_for_source >= MAX_FILES_READ_PER_REQUEST:
+            return _json({"error": "The per-request limit for reading files has been reached"})
         file = await db.files.find_one(
             {"source_id": source_id, "rel_path": rel_path},
             {"_id": 1, "rel_path": 1, "status": 1},
@@ -393,7 +469,7 @@ def build_intake_agent(
             {"_id": 0, "page": 1, "method": 1, "confidence": 1, "text": 1},
         ).sort("page", 1).limit(MAX_PAGES_FOR_MODEL)
         pages = await cursor.to_list(None)
-        remaining = MAX_PAGE_TEXT_FOR_MODEL
+        remaining = min(MAX_PAGE_TEXT_FOR_MODEL, remaining_page_chars)
         result_pages = []
         for page in pages:
             text = page.get("text", "")
@@ -408,11 +484,15 @@ def build_intake_agent(
             })
             if remaining <= 0:
                 break
+        consumed_chars = min(MAX_PAGE_TEXT_FOR_MODEL, remaining_page_chars) - remaining
+        remaining_page_chars -= consumed_chars
         was_truncated = len(result_pages) < len(pages) or remaining <= 0
         _trace(activity, "read_extracted_pages", "completed", source_id=source_id,
                rel_path=rel_path, pages=len(result_pages), truncated=was_truncated)
-        return _json({"source_id": source_id, "rel_path": rel_path,
-                      "pages": result_pages, "truncated": was_truncated})
+        result = _json({"source_id": source_id, "rel_path": rel_path,
+                        "pages": result_pages, "truncated": was_truncated})
+        extracted_page_results[cache_key] = result
+        return result
 
     tools.extend([get_scan_status, list_scanned_files, read_extracted_pages])
 
@@ -422,7 +502,6 @@ def build_intake_agent(
         model=model,
         tools=tools if allow_tool_calls else [],
         system_prompt=system_prompt,
-        checkpointer=checkpointer,
     )
     user_message = (
         f"Goal: {goal}\nSubmitted link: {_safe_link_label(url)}\n"
@@ -459,195 +538,42 @@ async def run_intake_agent(
         url=url,
         has_source_documents=source_path is not None,
     )
-    agent, user_message, tools = create_intake_agent(
+    agent, user_message, _tools = create_intake_agent(
         url=url,
         goal=goal,
         source_path=source_path,
         schedule_job=schedule_job,
         activity=activity,
-        thread_id=uuid.uuid4().hex,
         model=model,
     )
 
-    tool_map = {intake_tool.name: intake_tool for intake_tool in tools}
-
-    async def call_tool(name: str, arguments: dict | None = None) -> dict:
-        intake_tool = tool_map.get(name)
-        if intake_tool is None:
-            message = f"Required intake tool is unavailable: {name}"
-            _trace(activity, name, "failed", error=message)
-            return {"error": message}
-        try:
-            raw_result = await intake_tool.ainvoke(arguments or {})
-        except Exception as error:
-            logger.exception("Required intake tool %s failed", name)
-            message = f"{name} failed: {error}"
-            _trace(activity, name, "failed", error=str(error))
-            return {"error": message}
-        if isinstance(raw_result, str):
-            try:
-                payload = json.loads(raw_result)
-            except json.JSONDecodeError:
-                return {"result": raw_result}
-            return payload if isinstance(payload, dict) else {"result": payload}
-        return raw_result if isinstance(raw_result, dict) else {"result": raw_result}
-
-    sources_evidence: list[dict] = []
-    evidence: dict[str, object] = {"link": {}, "sources": sources_evidence}
-    link_result = await call_tool("inspect_submitted_link")
-    evidence["link"] = link_result
-
-    source_jobs: dict[str, str] = {}
-    if link_result.get("source_id") and link_result.get("job_id"):
-        source_jobs[link_result["source_id"]] = link_result["job_id"]
-
-    if source_path is not None:
-        folder_result = await call_tool("scan_selected_folder")
-        evidence["selected_folder"] = folder_result
-        if folder_result.get("source_id") and folder_result.get("job_id"):
-            source_jobs[folder_result["source_id"]] = folder_result["job_id"]
-
-    deadline = asyncio.get_running_loop().time() + MAX_JOB_WAIT_SECONDS
-    unresolved_jobs: list[dict] = []
-    remaining_evidence_chars = MAX_AGENT_PAGE_TEXT_CHARS
-    evidence_was_truncated = False
-    for source_id, job_id in source_jobs.items():
-        job_timed_out = False
-        while True:
-            job_status = await call_tool("get_scan_status", {"job_id": job_id})
-            state = job_status.get("status")
-            if state not in {"pending", "running"}:
-                break
-            if asyncio.get_running_loop().time() >= deadline:
-                job_timed_out = True
-                break
-            await asyncio.sleep(0.25)
-
-        source_result: dict[str, object] = {
-            "source_id": source_id,
-            "job_id": job_id,
-            "job_status": job_status,
-            "timed_out": job_timed_out,
-        }
-        files_result = await call_tool("list_scanned_files", {"source_id": source_id})
-        source_result["files"] = files_result
-
-        files = files_result.get("files", [])
-        page_results: list[dict] = []
-        for file_result in files if isinstance(files, list) else []:
-            if not isinstance(file_result, dict) or file_result.get("status") != "done":
-                continue
-            rel_path = file_result.get("rel_path")
-            if not isinstance(rel_path, str):
-                continue
-            page_result = await call_tool(
-                "read_extracted_pages",
-                {"source_id": source_id, "rel_path": rel_path},
-            )
-            pages = page_result.get("pages", [])
-            for page in pages if isinstance(pages, list) else []:
-                if not isinstance(page, dict):
-                    continue
-                text = page.get("text", "")
-                if not isinstance(text, str):
-                    text = str(text)
-                excerpt = text[:remaining_evidence_chars]
-                remaining_evidence_chars -= len(excerpt)
-                page["text"] = excerpt
-                if len(excerpt) < len(text):
-                    page["truncated"] = True
-                    evidence_was_truncated = True
-            page_results.append({"file": file_result, "extraction": page_result})
-        source_result["extracted_pages"] = page_results
-        sources_evidence.append(source_result)
-        state = job_status.get("status")
-        if job_timed_out or state not in {"completed", "partial_failure", "failed"}:
-            unresolved_jobs.append({
-                "source_id": source_id,
-                "job_id": job_id,
-                "status": state or job_status.get("error", "unknown"),
-            })
-
-    evidence["extraction_text_truncated"] = evidence_was_truncated
-
-    link_pages = link_result.get("pages", [])
-    has_link_text = False
-    if isinstance(link_pages, list):
-        has_link_text = any(
-            isinstance(page, dict)
-            and isinstance(page.get("text"), str)
-            and bool(page["text"].strip())
-            for page in link_pages
-        )
-    has_extracted_text = any(
-        isinstance(page, dict)
-        and isinstance(page.get("text"), str)
-        and bool(page["text"].strip())
-        for source in sources_evidence
-        for file_evidence in source.get("extracted_pages", [])
-        if isinstance(file_evidence, dict)
-        for page in file_evidence.get("extraction", {}).get("pages", [])
-        if isinstance(page, dict)
-    )
-    if not has_link_text and not has_extracted_text:
-        return goal_plan, (
-            "Fillo could not obtain readable page or document text, so it did not evaluate "
-            "the request. URL classification and inspection result: "
-            f"{json.dumps(link_result, ensure_ascii=False)}"
-        )
-    if unresolved_jobs:
-        return goal_plan, (
-            "Document processing is not complete, so Fillo did not generate field "
-            "matches. Check these jobs and retry: "
-            f"{json.dumps(unresolved_jobs, ensure_ascii=False)}"
-        )
-    if not has_extracted_text and source_path is not None:
-        document_errors = []
-        folder_error = evidence.get("selected_folder", {}).get("error")
-        if folder_error:
-            document_errors.append(f"Selected folder scan: {folder_error}")
-        for source in sources_evidence:
-            files = source.get("files", {})
-            if not isinstance(files, dict):
-                files = {}
-            if files.get("error"):
-                document_errors.append(str(files["error"]))
-            for file_result in files.get("files", []):
-                if isinstance(file_result, dict) and file_result.get("status") in {"failed", "skipped"}:
-                    name = file_result.get("name") or file_result.get("rel_path") or "Unknown file"
-                    detail = file_result.get("error") or file_result.get("status")
-                    document_errors.append(f"{name}: {detail}")
-            for file_evidence in source.get("extracted_pages", []):
-                if not isinstance(file_evidence, dict):
-                    continue
-                extraction = file_evidence.get("extraction", {})
-                if isinstance(extraction, dict) and extraction.get("error"):
-                    file_result = file_evidence.get("file", {})
-                    name = file_result.get("name", "Unknown file") if isinstance(file_result, dict) else "Unknown file"
-                    document_errors.append(f"{name}: {extraction['error']}")
-        error_summary = (
-            " Document issues: " + "; ".join(document_errors)
-            if document_errors
-            else ""
-        )
-        return goal_plan, (
-            "Fillo read the linked page, but no completed local document pages were available "
-            f"to support evaluation.{error_summary}"
-        )
-
-    evidence_message = (
-        f"{user_message}\nVerified intake evidence (tool outputs):\n"
-        f"{json.dumps(evidence, ensure_ascii=False)}\n\n"
-        "LLM-generated goal plan (intent summary only; not evidence):\n"
+    agent_message = (
+        f"{user_message}\n"
+        "Structured goal plan (intent summary; not evidence):\n"
         f"{json.dumps(goal_plan.model_dump(), ensure_ascii=False)}\n\n"
-        "Evaluate the user's goal using this evidence. Treat each web screenshot OCR page and "
-        "each local document page as separate evidence. Cite the URL title/host or file name, "
-        "page number, and verbatim supporting text for every proposed value."
+        "Inspect the submitted link and decide which available tools are needed. "
+        "Use tool results to choose each next step. Evaluate the goal only from "
+        "evidence returned by the tools."
     )
-    result = await agent.ainvoke(
-        {"messages": [{"role": "user", "content": evidence_message}]},
-        config={"recursion_limit": 16},
-    )
+    try:
+        result = await agent.ainvoke(
+            {"messages": [{"role": "user", "content": agent_message}]},
+            config={"recursion_limit": MAX_AGENT_RECURSION},
+        )
+    except GraphRecursionError:
+        return goal_plan, (
+            "Fillo reached the bounded tool-call limit before producing a final result. "
+            "Review the tool activity and retry with a narrower request if needed."
+        )
+    if not any(
+        item.get("tool") == "inspect_submitted_link"
+        and item.get("status") in {"completed", "failed"}
+        for item in activity
+    ):
+        return goal_plan, (
+            "Fillo did not inspect the submitted link, so it did not evaluate the request. "
+            "Retry the request or check the configured language model."
+        )
     messages = result.get("messages", [])
     if not messages:
         return goal_plan, "Fillo could not produce an intake summary."
