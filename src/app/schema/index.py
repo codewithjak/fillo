@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
-from app.agent.schemas import GoalPlan, IntakeProposal
+from app.agent.schemas import FormInspection, GoalPlan, IntakeProposal
 
 
 class DocOutput(BaseModel):
@@ -58,3 +58,4 @@ class AgentIntakeOutput(BaseModel):
     response: str
     tool_activity: list[AgentToolActivity]
     proposal: IntakeProposal | None = None
+    form_inspection: FormInspection | None = None

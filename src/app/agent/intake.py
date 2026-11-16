@@ -17,6 +17,7 @@ from langgraph.errors import GraphRecursionError
 from app.agent.llm import get_chat_model
 from app.agent.schemas import (
     GoalPlan,
+    FormInspection,
     IntakeProposal,
     IntakeProposalDraft,
     ProposedField,
@@ -352,6 +353,7 @@ def build_intake_agent(
     known_jobs: dict[str, str] = {}  # job_id -> source_id
     known_sources: set[str] = set()
     evidence_registry: dict[str, dict[str, object]] = {}
+    inspection_registry: dict[str, dict] = {}
     link_result: str | None = None
     folder_result: str | None = None
     status_check_counts: dict[str, int] = {}
@@ -383,7 +385,11 @@ def build_intake_agent(
                 resource_kind = "unsupported"
 
             if suffix == ".html":
-                title, screenshots, screenshot_capture_truncated = await capture_public_page(fetched)
+                title, screenshots, screenshot_capture_truncated, raw_form_inspection = (
+                    await capture_public_page(fetched)
+                )
+                form_inspection = FormInspection.model_validate(raw_form_inspection).model_dump()
+                inspection_registry["form_inspection"] = form_inspection
                 remaining_chars = MAX_WEB_PAGE_OCR_CHARS
                 pages = []
                 ocr_text_truncated = False
@@ -424,6 +430,7 @@ def build_intake_agent(
                     "title": title,
                     "host": parts.hostname,
                     "pages": pages,
+                    "form_inspection": form_inspection,
                     "screenshot_count": len(screenshots),
                     "screenshot_capture_truncated": screenshot_capture_truncated,
                     "ocr_text_truncated": ocr_text_truncated,
@@ -436,6 +443,8 @@ def build_intake_agent(
                 _trace(activity, "inspect_submitted_link", "completed",
                        resource_type="web_page_ocr", resource_kind="html_page",
                        host=parts.hostname, screenshots=len(screenshots),
+                       form_inspection_status=form_inspection["status"],
+                       form_field_count=len(form_inspection["fields"]),
                        screenshot_capture_truncated=screenshot_capture_truncated,
                        ocr_text_truncated=ocr_text_truncated,
                        ocr_chars=ocr_chars)
@@ -758,7 +767,7 @@ def build_intake_agent(
             if allow_tool_calls
             else " A local folder was selected and its scan results are included when available."
         )
-    return agent, user_message, tools, evidence_registry
+    return agent, user_message, tools, evidence_registry, inspection_registry
 
 
 async def run_intake_agent(
@@ -768,7 +777,7 @@ async def run_intake_agent(
     source_path: str | None,
     schedule_job: Callable[[str, str], None],
     activity: list[dict],
-) -> tuple[GoalPlan, str, IntakeProposal | None]:
+) -> tuple[GoalPlan, str, IntakeProposal | None, FormInspection | None]:
     from app.agentic.agent import create_intake_agent
 
     model = get_chat_model()
@@ -778,7 +787,7 @@ async def run_intake_agent(
         url=url,
         has_source_documents=source_path is not None,
     )
-    agent, user_message, _tools, evidence_registry = create_intake_agent(
+    agent, user_message, _tools, evidence_registry, inspection_registry = create_intake_agent(
         url=url,
         goal=goal,
         source_path=source_path,
@@ -855,4 +864,10 @@ async def run_intake_agent(
             "Review the tool activity and retry with a narrower request if needed."
         )
 
-    return goal_plan, response, proposal
+    form_inspection_data = inspection_registry.get("form_inspection")
+    form_inspection = (
+        FormInspection.model_validate(form_inspection_data)
+        if form_inspection_data is not None
+        else None
+    )
+    return goal_plan, response, proposal, form_inspection

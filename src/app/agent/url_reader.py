@@ -164,6 +164,166 @@ def fetch_public_url(
 MAX_WEB_PAGE_SCREENSHOTS = 8
 MAX_WEB_PAGE_REQUESTS = 60
 MAX_WEB_PAGE_BYTES = 40 * 1024 * 1024
+MAX_WEB_PAGE_FORM_CONTROLS = 200
+MAX_WEB_PAGE_FORM_OPTIONS = 100
+
+_FORM_CONTROL_INSPECTION_SCRIPT = r"""limits => {
+    const normalize = value => (value || "").replace(/\s+/g, " ").trim();
+    const visible = element => {
+        const style = window.getComputedStyle(element);
+        return Boolean(element.getClientRects().length) &&
+            style.display !== "none" && style.visibility !== "hidden" &&
+            style.visibility !== "collapse";
+    };
+    const controls = Array.from(document.querySelectorAll(
+        'input, select, textarea, [contenteditable="true"], [role="textbox"], '
+        '[role="combobox"], [role="checkbox"], [role="radio"], '
+        '[role="listbox"], [role="spinbutton"]'
+    )).filter(element => {
+        if (!visible(element)) return false;
+        if (element.tagName === "INPUT" && element.type.toLowerCase() === "hidden") return false;
+        if (element.tagName === "INPUT" &&
+            ["button", "submit", "reset", "image"].includes(element.type.toLowerCase())) return false;
+        return true;
+    });
+    const accessibleLabel = element => {
+        const labelledBy = normalize((element.getAttribute("aria-labelledby") || "")
+            .split(/\s+/)
+            .map(id => document.getElementById(id)?.innerText || "")
+            .join(" "));
+        if (labelledBy) return labelledBy;
+        const ariaLabel = normalize(element.getAttribute("aria-label"));
+        if (ariaLabel) return ariaLabel;
+        return normalize(Array.from(element.labels || [])
+            .map(label => label.innerText || label.textContent || "")
+            .join(" ")) || null;
+    };
+    const described = controls.map((element, index) => {
+        const tag = element.tagName.toLowerCase();
+        const type = tag === "input"
+            ? (element.type || "text").toLowerCase()
+            : tag === "select"
+                ? (element.multiple ? "select-multiple" : "select-one")
+                : tag === "textarea"
+                    ? "textarea"
+                    : element.getAttribute("role") ||
+                        (element.isContentEditable ? "contenteditable" : "custom");
+        const role = element.getAttribute("role") || null;
+        const label = (accessibleLabel(element) || "").slice(0, 300) || null;
+        const id = (element.id || "").slice(0, 200) || null;
+        const name = (element.getAttribute("name") || "").slice(0, 200) || null;
+        const testId = (element.getAttribute("data-testid") || "").slice(0, 200) || null;
+        const optionValue = ["radio", "checkbox"].includes(type)
+            ? element.getAttribute("value")
+            : null;
+        const formIndex = element.form
+            ? Array.from(document.forms).indexOf(element.form)
+            : -1;
+        const placeholder = element.getAttribute("placeholder") || "";
+        const identity = id
+            ? "id:" + id
+            : name
+                ? "name:" + name + "|option:" + (optionValue || "") + "|label:" + (label || "")
+                : "label:" + (label || "") + "|placeholder:" + placeholder + "|index:" + index;
+        const key = [formIndex, tag, type, identity].join("|");
+        const constraints = {};
+        for (const attribute of ["min", "max", "step", "minlength", "maxlength",
+            "pattern", "accept", "inputmode", "autocomplete", "aria-valuemin",
+            "aria-valuemax"]) {
+            if (element.hasAttribute(attribute)) {
+                constraints[attribute] = element.getAttribute(attribute).slice(0, 500);
+            }
+        }
+        const options = tag === "select"
+            ? Array.from(element.options).slice(0, limits.max_options).map(option => ({
+                label: normalize(option.label || option.textContent).slice(0, 200),
+                value: option.value.slice(0, 200),
+                disabled: option.disabled || Boolean(option.parentElement?.disabled),
+            }))
+            : ["combobox", "listbox"].includes(role)
+                ? Array.from(element.querySelectorAll('[role="option"]')).slice(0, limits.max_options).map(option => ({
+                    label: normalize(option.innerText || option.textContent).slice(0, 200),
+                    value: (option.getAttribute("data-value") || option.getAttribute("value") || "").slice(0, 200),
+                    disabled: option.getAttribute("aria-disabled") === "true",
+                }))
+            : ["radio", "checkbox"].includes(type)
+                ? [{label: label || "", value: (element.getAttribute("value") || "on").slice(0, 200),
+                    disabled: element.matches(":disabled")}]
+                : [];
+        const options_truncated = tag === "select"
+            ? element.options.length > limits.max_options
+            : ["combobox", "listbox"].includes(role)
+                ? element.querySelectorAll('[role="option"]').length > limits.max_options
+                : false;
+        return {
+            _key: key,
+            label,
+            placeholder: normalize(element.getAttribute("placeholder")).slice(0, 300) || null,
+            tag,
+            type,
+            role,
+            name,
+            group_name: ["radio", "checkbox"].includes(type) ? name : null,
+            required: Boolean(element.required) || element.getAttribute("aria-required") === "true",
+            disabled: element.matches(":disabled") || element.getAttribute("aria-disabled") === "true",
+            read_only: Boolean(element.readOnly) || element.getAttribute("aria-readonly") === "true",
+            fillable: !element.matches(":disabled") && element.getAttribute("aria-disabled") !== "true" &&
+                !element.readOnly && element.getAttribute("aria-readonly") !== "true",
+            options,
+            options_truncated,
+            constraints,
+            _id: id,
+            _test_id: testId,
+            _index: index,
+        };
+    });
+    const labelCounts = new Map();
+    for (const field of described) {
+        if (field.label) labelCounts.set(field.label, (labelCounts.get(field.label) || 0) + 1);
+    }
+    const idCounts = new Map();
+    for (const element of document.querySelectorAll("[id]")) {
+        idCounts.set(element.id, (idCounts.get(element.id) || 0) + 1);
+    }
+    const testIdCounts = new Map();
+    for (const element of document.querySelectorAll("[data-testid]")) {
+        const value = element.getAttribute("data-testid");
+        testIdCounts.set(value, (testIdCounts.get(value) || 0) + 1);
+    }
+    const nameCounts = new Map();
+    for (const element of document.querySelectorAll("[name]")) {
+        const value = element.getAttribute("name");
+        nameCounts.set(value, (nameCounts.get(value) || 0) + 1);
+    }
+    const fields = described.slice(0, limits.max_controls).map(field => {
+        const locators = [];
+        if (field.label) locators.push({
+            strategy: "label", value: field.label,
+            unique: labelCounts.get(field.label) === 1, control_type: field.type,
+        });
+        if (field._test_id) locators.push({
+            strategy: "test_id", value: field._test_id,
+            unique: testIdCounts.get(field._test_id) === 1, control_type: field.type,
+        });
+        if (field._id) locators.push({
+            strategy: "id", value: field._id,
+            unique: idCounts.get(field._id) === 1, control_type: field.type,
+        });
+        if (field.name) {
+            locators.push({
+                strategy: "name", value: field.name,
+                unique: nameCounts.get(field.name) === 1, control_type: field.type,
+            });
+        }
+        const {_key, _id, _test_id, _index, ...publicField} = field;
+        return {...publicField, _inspection_key: _key, locators};
+    });
+    return {
+        fields,
+        truncated: described.length > limits.max_controls ||
+            fields.some(field => field.options_truncated),
+    };
+}"""
 
 
 def _add_base_url(body: bytes, base_url: str) -> bytes:
@@ -188,8 +348,8 @@ def looks_like_html(content_type: str, body: bytes) -> bool:
 
 async def capture_public_page(
     fetched: FetchedResource,
-) -> tuple[str, list[PageScreenshot], bool]:
-    """Render a safely fetched HTML page and capture a bounded set of visible viewports."""
+) -> tuple[str, list[PageScreenshot], bool, dict]:
+    """Render a public HTML page, capture viewports, and inspect visible controls."""
     try:
         from playwright.async_api import async_playwright
     except ImportError as e:
@@ -283,8 +443,31 @@ async def capture_public_page(
             title = await page.title()
 
             screenshots: list[PageScreenshot] = []
+            inspected_fields: dict[str, dict] = {}
+            controls_truncated = False
+            inspection_failed = False
             reached_bottom = False
             for screenshot_number in range(1, MAX_WEB_PAGE_SCREENSHOTS + 1):
+                try:
+                    snapshot = await page.evaluate(
+                        _FORM_CONTROL_INSPECTION_SCRIPT,
+                        {
+                            "max_controls": MAX_WEB_PAGE_FORM_CONTROLS,
+                            "max_options": MAX_WEB_PAGE_FORM_OPTIONS,
+                        },
+                    )
+                    controls_truncated = controls_truncated or snapshot["truncated"]
+                    for field in snapshot["fields"]:
+                        inspection_key = field.pop("_inspection_key")
+                        if inspection_key in inspected_fields:
+                            inspected_fields[inspection_key] = field
+                        elif len(inspected_fields) < MAX_WEB_PAGE_FORM_CONTROLS:
+                            inspected_fields[inspection_key] = field
+                        else:
+                            controls_truncated = True
+                except Exception:
+                    inspection_failed = True
+
                 position = await page.evaluate(
                     """() => ({
                         y: Math.round(window.scrollY),
@@ -309,6 +492,52 @@ async def capture_public_page(
                 await page.evaluate("y => window.scrollTo(0, y)", next_y)
                 await page.wait_for_timeout(500)
 
-            return title, screenshots, not reached_bottom
+            embedded_frame_count = max(0, len(page.frames) - 1)
+            notes = [
+                "Only visible controls in the rendered main document are included; current field values are omitted."
+            ]
+            unlabeled_count = sum(
+                1 for field in inspected_fields.values() if not field.get("label")
+            )
+            if unlabeled_count:
+                notes.append(
+                    f"{unlabeled_count} inspected control(s) had no accessible label; "
+                    "use screenshot OCR to interpret them."
+                )
+            if not reached_bottom:
+                notes.append(
+                    "Page capture stopped before reaching the bottom; more controls may exist below."
+                )
+            if embedded_frame_count:
+                notes.append("Controls inside embedded frames were not inspected.")
+            if controls_truncated:
+                notes.append(
+                    f"Inspection was limited to {MAX_WEB_PAGE_FORM_CONTROLS} controls "
+                    f"and {MAX_WEB_PAGE_FORM_OPTIONS} options per control."
+                )
+            if inspection_failed:
+                notes.append("DOM inspection failed for one or more page viewports; OCR results remain available.")
+            fields = [
+                {"field_id": f"web-field-{index}", **field}
+                for index, field in enumerate(inspected_fields.values(), start=1)
+            ]
+            inspection_partial = (
+                embedded_frame_count > 0
+                or controls_truncated
+                or inspection_failed
+                or not reached_bottom
+            )
+            form_inspection = {
+                "status": (
+                    "partial"
+                    if inspection_partial
+                    else "completed" if fields else "no_controls"
+                ),
+                "fields": fields,
+                "truncated": controls_truncated or not reached_bottom,
+                "embedded_frame_count": embedded_frame_count,
+                "notes": notes,
+            }
+            return title, screenshots, not reached_bottom, form_inspection
         finally:
             await browser.close()

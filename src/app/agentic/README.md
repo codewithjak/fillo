@@ -28,7 +28,11 @@ results it receives.
    with the configured OCR engine. OCR results include screenshot page number,
    scroll offset, and confidence when available. Reachable non-HTML resources
    are classified as images, linked documents, or unsupported; fetch failures
-   are reported as inaccessible. Supported linked files are saved under
+   are reported as inaccessible. The rendered page is also inspected for
+   visible inputs, selects, textareas, and content-editable controls. Fillo
+   returns their labels, types, required state, options, constraints, and
+   available locator candidates without reading current field values or
+   interacting with controls. Supported linked files are saved under
    `REMOTE_SOURCE_ROOT` and registered with the existing ingestion service.
 5. **Choose source-document work** — after seeing URL results, the agent calls
    `scan_selected_folder` when the goal needs information from the selected
@@ -53,8 +57,8 @@ results it receives.
    instructions.
 8. **Return the result** — the API returns `goal_plan`, a concise status
    `response`, the machine-readable `proposal` when the goal is fill/create/
-   extract, and `tool_activity`, including completed, failed, and cached
-   operations.
+   extract, `form_inspection` when a rendered HTML page was inspected, and
+   `tool_activity`, including completed, failed, and cached operations.
 
 ## Tool and model responsibilities
 
@@ -64,6 +68,7 @@ results it receives.
 | Choose and sequence intake tools | LangChain agent / LLM |
 | Enforce allowed URL and folder access | Application and request-bound tools |
 | Fetch a URL, render HTML, and run OCR | `inspect_submitted_link` tool, browser capture, configured OCR engine |
+| Describe visible controls and locator candidates | Rendered-page DOM inspection in `capture_public_page` |
 | Catalog a selected folder and enqueue a scan | `scan_selected_folder` tool and ingestion service |
 | Run document OCR or text extraction | Existing ingestion worker and readers |
 | Choose which job/file/page results to read next | LangChain agent / LLM, within tool checks and request limits |
@@ -85,6 +90,10 @@ resumption.
 - HTML is rendered without interacting with forms. Only the first eight
   viewport screenshots are OCR'd; pages that require authentication, blocked
   requests, POST-based data, or later interaction may not expose all content.
+- Form inspection is limited to visible controls in the main rendered document,
+  at up to 200 controls. Embedded frames are reported but not inspected, and
+  locator candidates can be ambiguous. The description does not guarantee a
+  control can be filled successfully.
 - Only public HTTP/HTTPS URLs on standard ports are fetched. Redirects, download
   size, and connection time are bounded; inaccessible and unsupported outcomes
   are returned explicitly.

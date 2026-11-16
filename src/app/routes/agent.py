@@ -33,7 +33,7 @@ async def agentic_intake(body: AgentIntakeInput, request: Request) -> AgentIntak
     run_id = uuid.uuid4().hex
     activity: list[dict] = []
     try:
-        goal_plan, response, proposal = await run_intake_agent(
+        goal_plan, response, proposal, form_inspection = await run_intake_agent(
             url=str(body.url),
             goal=body.goal,
             source_path=source_path,
@@ -50,4 +50,5 @@ async def agentic_intake(body: AgentIntakeInput, request: Request) -> AgentIntak
         response=response,
         tool_activity=activity,
         proposal=proposal,
+        form_inspection=form_inspection,
     )

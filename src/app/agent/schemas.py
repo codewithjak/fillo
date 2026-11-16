@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -73,3 +73,43 @@ class IntakeProposal(BaseModel):
     status: Literal["ready", "no_evidence", "failed"]
     fields: list[ProposedField] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+
+
+class FormLocator(BaseModel):
+    strategy: Literal["label", "id", "name", "test_id"]
+    value: str
+    unique: bool
+    control_type: str | None = None
+
+
+class FormOption(BaseModel):
+    label: str
+    value: str
+    disabled: bool = False
+
+
+class InspectedFormField(BaseModel):
+    field_id: str
+    label: str | None = None
+    placeholder: str | None = None
+    tag: str
+    type: str
+    role: str | None = None
+    name: str | None = None
+    group_name: str | None = None
+    required: bool = False
+    disabled: bool = False
+    read_only: bool = False
+    fillable: bool = True
+    options: list[FormOption] = Field(default_factory=list)
+    options_truncated: bool = False
+    constraints: dict[str, Any] = Field(default_factory=dict)
+    locators: list[FormLocator] = Field(default_factory=list)
+
+
+class FormInspection(BaseModel):
+    status: Literal["completed", "partial", "no_controls", "not_applicable"]
+    fields: list[InspectedFormField] = Field(default_factory=list)
+    truncated: bool = False
+    embedded_frame_count: int = 0
+    notes: list[str] = Field(default_factory=list)
